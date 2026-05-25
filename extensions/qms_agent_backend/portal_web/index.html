@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MP Agent 助手</title>
+  <link rel="stylesheet" href="/portal/static/styles.css">
+</head>
+<body>
+
+  <!-- 登录卡片 -->
+  <div id="loginCard" class="login-screen">
+    <div class="login-card">
+      <h1 id="authTitle">MP Agent 助手</h1>
+      <div class="msg" id="loginMsg" style="color:var(--danger);font-weight:600;min-height:24px;"></div>
+
+      <!-- 登录表单 -->
+      <div id="loginForm">
+        <div class="form-group">
+          <label>用户名</label>
+          <input type="text" id="username" placeholder="请输入用户名">
+        </div>
+        <div class="form-group">
+          <label>密码</label>
+          <input type="password" id="password" placeholder="请输入密码">
+        </div>
+        <button id="loginBtn" class="btn btn-primary full">登录</button>
+        <div class="auth-switch">没有账号？<a href="#" id="showRegister">注册新账号</a></div>
+      </div>
+
+      <!-- 注册表单 -->
+      <div id="registerForm" style="display:none;">
+        <div class="form-group">
+          <label>用户名</label>
+          <input type="text" id="regUsername" placeholder="如 zhangsan@siemens-healthineers.com（teams账号）">
+        </div>
+        <div class="form-group">
+          <label>密码</label>
+          <input type="password" id="regPassword" placeholder="至少6位">
+        </div>
+        <div class="form-group">
+          <label>所属部门</label>
+          <select id="regDeptId">
+            <option value="dept_mp">MP 总部</option>
+            <option value="dept_mp_q">MP 质量部门 (Q)</option>
+            <option value="dept_mp_plm">MP 产品生命周期部门 (PLM)</option>
+            <option value="dept_mp_ap">MP AP部门</option>
+            <option value="dept_mp_mc">MP MC部门</option>
+            <option value="dept_mp_usdx">MP US&DX部门</option>
+          </select>
+        </div>
+        <button id="registerBtn" class="btn btn-primary full">注册</button>
+        <div class="auth-switch">已有账号？<a href="#" id="showLogin">返回登录</a></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 工作台主界面 -->
+  <div id="appWrapper" class="app-wrapper hidden">
+
+    <!-- ===== 顶部导航栏 ===== -->
+    <div class="top-header">
+      <div class="top-header-left">
+        <img class="top-logo" src="/portal/static/西门子医疗logo.png" alt="Logo">
+      </div>
+      <div class="top-header-right">
+        <div class="account-area" id="accountArea">
+          <button id="accountBtn" class="account-btn">
+            <span id="accountName">MP</span>
+            <span class="account-arrow">▾</span>
+          </button>
+          <div id="accountDropdown" class="account-dropdown hidden">
+            <button id="logoutBtn" class="account-dropdown-item">退出登录</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 下方内容区 ===== -->
+    <div class="workspace">
+
+      <!-- 侧边栏切换按钮（固定在左侧边缘） -->
+      <button id="sidebarToggle" class="sidebar-toggle" title="收起/展开面板">◀</button>
+
+      <!-- 左侧边栏（固定定位，滑动动画） -->
+      <div class="sidebar" id="sidebar">
+        <div class="sidebar-content" id="sidebarContent">
+          <!-- 1. 会话历史 -->
+          <div class="collapsible-section" id="sessionHistorySection">
+            <button id="toggleSessionHistory" class="collapsible-btn">
+              <span class="collapsible-icon">▶</span> 会话历史
+            </button>
+            <div class="collapsible-content" id="sessionHistoryContainer">
+              <div id="sessionHistory" class="session-list"></div>
+            </div>
+          </div>
+
+          <!-- 2. 工作台设置 -->
+          <div class="collapsible-section" id="workbenchSection">
+            <button id="toggleWorkbench" class="collapsible-btn">
+              <span class="collapsible-icon">▼</span> 工作台设置
+            </button>
+            <div class="collapsible-content" id="workbenchContainer">
+              <div id="deptSelectWrap" class="form-group">
+                <label>部门</label>
+                <select id="deptSelect"></select>
+              </div>
+              <button id="newSessionBtn" class="btn btn-primary full">创建会话设置</button>
+            </div>
+          </div>
+
+          <!-- 3. 知识库管理 -->
+          <div class="collapsible-section" id="kbManagementSection">
+            <button id="toggleKbManagement" class="collapsible-btn">
+              <span class="collapsible-icon">▶</span> 知识库管理
+            </button>
+            <div class="collapsible-content" id="kbManagementContainer">
+              <div class="kb-action-list">
+                <button id="openKbUploadBtn" class="btn btn-secondary full sidebar-action-btn">上传知识库</button>
+                <button id="openKbShareBtn" class="btn btn-secondary full sidebar-action-btn">分享知识库</button>
+                <button id="openKbChainBtn" class="btn btn-secondary full sidebar-action-btn">分享链路</button>
+                <button id="openKbUnshareBtn" class="btn btn-secondary full sidebar-action-btn">撤销知识库分享</button>
+                <button id="openDeleteKbBtn" class="btn btn-danger full sidebar-action-btn">删除知识库</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. 分享申请（仅管理员可见） -->
+          <div id="shareRequestsBtnWrap" class="collapsible-section hidden">
+            <button id="openShareRequestsBtn" class="collapsible-btn" style="position:relative;">
+              <span class="collapsible-icon" style="visibility:hidden;">▶</span> 分享申请
+              <span id="shareReqBadge" class="tag tag-direct hidden" style="margin-left:auto;">0</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      <!-- 结束 .sidebar -->
+
+      <!-- 移动端侧边栏遮罩 -->
+      <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+
+      <!-- 右侧聊天主区域 -->
+      <div class="chat-main">
+        <div class="chat-header">
+          <button id="mobileMenuBtn" class="mobile-menu-btn" title="打开侧边栏">☰</button>
+          <span id="sessionInfo">未选择会话</span>
+        </div>
+        <div class="chat-box" id="chatBox"></div>
+        <div class="composer">
+          <textarea id="question" placeholder="输入问题..."></textarea>
+          <button id="askBtn" class="btn btn-primary">发送</button>
+        </div>
+        <div class="msg" id="chatMsg"></div>
+      </div>
+
+      <!-- ===== 弹窗 ===== -->
+      <div class="config-modal hidden" id="configModal">
+        <div class="config-modal-card">
+          <div class="config-modal-header">
+            <div class="config-modal-title">创建会话配置</div>
+            <button id="closeConfigBtn" class="btn btn-ghost small">✕</button>
+          </div>
+          <div class="config-modal-body">
+            <div class="config-section">
+              <div class="config-title">智能体配置（单选）</div>
+              <div id="agentRadioPanel" class="config-list"></div>
+            </div>
+            <div class="config-section">
+              <div class="config-title">知识库选择</div>
+              <div class="kb-actions">
+                <button id="selectAllKbMain" class="btn btn-ghost small">全选</button>
+                <button id="deselectAllKbMain" class="btn btn-ghost small">全不选</button>
+              </div>
+              <div id="kbCheckboxPanelMain" class="config-list"></div>
+            </div>
+            <div class="form-group inline">
+              <label class="checkline"><input type="checkbox" id="sessionPrivateToggle"> 私密会话（仅自己可见）</label>
+            </div>
+          </div>
+          <div class="config-modal-footer">
+            <button id="createSessionModalBtn" class="btn btn-primary">创建会话</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="config-modal hidden" id="kbUploadModal">
+        <div class="config-modal-card config-modal-sm">
+          <div class="config-modal-header">
+            <div class="config-modal-title">上传知识库</div>
+            <button id="closeKbUploadBtn" class="btn btn-ghost small">✕</button>
+          </div>
+          <div class="config-modal-body">
+            <div class="form-group" style="position:relative;"><label>知识库名称</label><input type="text" id="kbNameInput" placeholder="请输入知识库名称（同名将追加文件到已有知识库）" autocomplete="off"><div id="kbNameDropdown" class="autocomplete-dropdown hidden"></div></div>
+            <div class="form-group"><label>知识库描述（选填）</label><input type="text" id="kbDescInput" placeholder="请输入描述"></div>
+            <div class="form-group inline"><label class="checkline"><input type="checkbox" id="kbPrivateToggle"> 私密知识库（部门管理员不可见）</label></div>
+            <div class="form-group"><label>选择文件</label><input type="file" id="kbFileInput" multiple></div>
+            <div class="msg" id="kbUploadMsg"></div>
+          </div>
+          <div class="config-modal-footer"><button id="kbUploadBtn" class="btn btn-primary">上传文件</button></div>
+        </div>
+      </div>
+
+      <div class="config-modal hidden" id="kbShareModal">
+        <div class="config-modal-card config-modal-sm">
+          <div class="config-modal-header">
+            <div class="config-modal-title">分享知识库</div>
+            <button id="closeKbShareBtn" class="btn btn-ghost small">✕</button>
+          </div>
+          <div class="config-modal-body">
+            <div class="form-group"><label>选择知识库</label><select id="shareKbSelect"></select></div>
+            <div class="form-group"><label>分享范围</label><select id="shareScopeSelect"><option value="user">指定人员</option><option value="dept">分享到部门</option><option value="mp">公开</option></select></div>
+            <div id="shareUserWrap" class="form-group hidden" style="position:relative;"><input type="text" id="shareUserInput" placeholder="输入邮箱模糊搜索用户" autocomplete="off"><div id="shareUserDropdown" class="autocomplete-dropdown hidden"></div></div>
+            <div id="sharePermWrap" class="form-group hidden"><label>权限</label><select id="sharePermSelect"><option value="read">只读</option><option value="write">可改写 + 可分享</option></select></div>
+            <div id="shareTargetWrap" class="share-target-wrap hidden"><label>选择目标部门</label><div id="shareTargetPanel"></div></div>
+            <div class="form-group"><label>申请理由（选填）</label><textarea id="shareReasonInput" placeholder="请输入申请理由"></textarea></div>
+            <div class="msg" id="shareReqMsg"></div>
+          </div>
+          <div class="config-modal-footer"><button id="shareReqBtn" class="btn btn-primary">申请分享</button></div>
+        </div>
+      </div>
+
+      <div class="config-modal hidden" id="kbUnshareModal">
+        <div class="config-modal-card config-modal-sm">
+          <div class="config-modal-header">
+            <div class="config-modal-title">撤销知识库分享</div>
+            <button id="closeKbUnshareBtn" class="btn btn-ghost small">✕</button>
+          </div>
+          <div class="config-modal-body">
+            <div class="config-section"><div class="config-title">选择要撤销共享的知识库</div><div id="unshareKbList" class="config-list"></div></div>
+            <div class="msg" id="unshareMsg"></div>
+          </div>
+          <div class="config-modal-footer"><button id="unshareKbBtn" class="btn btn-primary">撤销分享</button></div>
+        </div>
+      </div>
+
+      <div class="config-modal hidden" id="deleteKbModal">
+        <div class="config-modal-card config-modal-sm">
+          <div class="config-modal-header">
+            <div class="config-modal-title">删除知识库</div>
+            <button id="closeDeleteKbBtn" class="btn btn-ghost small">✕</button>
+          </div>
+          <div class="config-modal-body">
+            <div class="config-section"><div class="config-title">选择要删除的知识库</div><div id="deleteKbList" class="config-list"></div></div>
+            <div class="msg" id="deleteKbMsg"></div>
+          </div>
+          <div class="config-modal-footer"><button id="confirmDeleteKbBtn" class="btn btn-danger">删除</button></div>
+        </div>
+      </div>
+
+      <!-- 分享链路弹窗 -->
+      <div class="config-modal hidden" id="kbChainModal">
+        <div class="config-modal-card config-modal-sm">
+          <div class="config-modal-header">
+            <div class="config-modal-title">分享链路</div>
+            <button id="closeKbChainBtn" class="btn btn-ghost small">✕</button>
+          </div>
+          <div class="config-modal-body">
+            <div class="form-group">
+              <label>选择知识库</label>
+              <select id="chainKbSelect"><option value="">-- 请选择 --</option></select>
+            </div>
+            <div id="chainView" class="chain-view"></div>
+            <div id="chainMsg" class="msg"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="config-modal hidden" id="shareRequestsModal">
+        <div class="config-modal-card config-modal-sm">
+          <div class="config-modal-header">
+            <div class="config-modal-title">分享申请管理</div>
+            <button id="closeShareRequestsBtn" class="btn btn-ghost small">✕</button>
+          </div>
+          <div class="config-modal-body">
+            <div class="msg" id="shareListMsg"></div>
+            <div id="shareRequestsList" class="share-requests-list"></div>
+          </div>
+          <div class="config-modal-footer"><button id="refreshShareBtn" class="btn btn-ghost small">刷新</button></div>
+        </div>
+      </div>
+
+    </div>
+    <!-- 结束 .workspace -->
+  </div>
+  <!-- 结束 .app-wrapper -->
+
+  <script src="/portal/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+name: "Basic Agent Evaluation"
+description: "Minimal evaluation suite demonstrating all available fields"
+version: "1.0"
+tags:
+  - example
+  - basic
+
+# Optional: default agent target (can be overridden at run time)
+target:
+  agent_title: "My Agent"
+  # OR agent_id: "f931f874..."
+  # OR dialog_id: "abc123..."
+
+# Global defaults
+defaults:
+  timeout_sec: 120
+  tags: []
+
+cases:
+  - id: "basic-001"
+    question: "What is retrieval-augmented generation?"
+    reference_answer: "RAG is a technique that combines information retrieval with language generation to produce more accurate and grounded responses."
+    expected_output_contains:
+      - "retrieval"
+      - "generation"
+    tags:
+      - definition
+      - easy
+    metadata:
+      difficulty: easy
+      domain: rag
+
+  - id: "basic-002"
+    question: "Explain the difference between vector search and keyword search"
+    reference_answer: "Vector search uses dense embeddings to find semantically similar documents, while keyword search uses sparse term matching like BM25."
+    expected_output_contains:
+      - "vector"
+      - "keyword"
+    expected_output_regex:
+      - "(?i)embedding|semantic"
+    tags:
+      - technical
+      - medium
+    metadata:
+      difficulty: medium
+      domain: search
+
+  - id: "basic-003"
+    question: "How does chunking affect RAG quality?"
+    tags:
+      - quality
+      - medium
+    metadata:
+      difficulty: medium
+      domain: optimization
+
+  - id: "basic-004"
+    question: "What are the best practices for prompt engineering in RAG systems?"
+    reference_answer: "Best practices include providing clear instructions, including context from retrieved documents, using structured formats, and iterating on prompts based on evaluation results."
+    expected_output_contains:
+      - "prompt"
+      - "context"
+    tags:
+      - best_practices
+      - easy
