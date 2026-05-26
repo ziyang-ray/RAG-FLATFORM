@@ -208,9 +208,9 @@
           </div>
           <div class="config-modal-body">
             <div class="form-group"><label>选择知识库</label><select id="shareKbSelect"></select></div>
-            <div class="form-group"><label>分享范围</label><select id="shareScopeSelect"><option value="user">指定人员</option><option value="dept">分享到部门</option><option value="mp">公开</option></select></div>
+            <div class="form-group"><label>分享范围</label><select id="shareScopeSelect"><option value="dept">分享到部门</option><option value="user">点对点分享</option></select></div>
             <div id="shareUserWrap" class="form-group hidden" style="position:relative;"><input type="text" id="shareUserInput" placeholder="输入邮箱模糊搜索用户" autocomplete="off"><div id="shareUserDropdown" class="autocomplete-dropdown hidden"></div></div>
-            <div id="sharePermWrap" class="form-group hidden"><label>权限</label><select id="sharePermSelect"><option value="read">只读</option><option value="write">可改写 + 可分享</option></select></div>
+            <div id="sharePermWrap" class="form-group hidden"><label>权限设置</label><div id="sharePermCheckboxes" class="perm-checkbox-group"><label class="checkline"><input type="checkbox" id="permRead" value="4" checked disabled> 可读(R)</label><label class="checkline"><input type="checkbox" id="permWrite" value="2"> 可写(W)</label><label class="checkline"><input type="checkbox" id="permShare" value="1"> 可发起分享(S)</label></div></div>
             <div id="shareTargetWrap" class="share-target-wrap hidden"><label>选择目标部门</label><div id="shareTargetPanel"></div></div>
             <div class="form-group"><label>申请理由（选填）</label><textarea id="shareReasonInput" placeholder="请输入申请理由"></textarea></div>
             <div class="msg" id="shareReqMsg"></div>
@@ -220,16 +220,23 @@
       </div>
 
       <div class="config-modal hidden" id="kbUnshareModal">
-        <div class="config-modal-card config-modal-sm">
+        <div class="config-modal-card config-modal-md">
           <div class="config-modal-header">
-            <div class="config-modal-title">撤销知识库分享</div>
+            <div class="config-modal-title">撤回分享</div>
             <button id="closeKbUnshareBtn" class="btn btn-ghost small">✕</button>
           </div>
           <div class="config-modal-body">
-            <div class="config-section"><div class="config-title">选择要撤销共享的知识库</div><div id="unshareKbList" class="config-list"></div></div>
+            <div class="recall-section">
+              <div class="recall-section-title">部门分享</div>
+              <div id="recallDeptShares" class="recall-list"></div>
+            </div>
+            <div class="recall-section">
+              <div class="recall-section-title">个人分享</div>
+              <div id="recallUserShares" class="recall-list"></div>
+            </div>
             <div class="msg" id="unshareMsg"></div>
           </div>
-          <div class="config-modal-footer"><button id="unshareKbBtn" class="btn btn-primary">撤销分享</button></div>
+          <div class="config-modal-footer"><button id="refreshRecallBtn" class="btn btn-ghost small">刷新</button></div>
         </div>
       </div>
 

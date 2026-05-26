@@ -260,6 +260,8 @@ class PortalStore:
                 conn.execute("ALTER TABLE portal_sessions ADD COLUMN kb_ids_json TEXT NOT NULL DEFAULT '[]'")
             if "is_private" not in sess_col_names:
                 conn.execute("ALTER TABLE portal_sessions ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0")
+            if "kb_overridden" not in sess_col_names:
+                conn.execute("ALTER TABLE portal_sessions ADD COLUMN kb_overridden INTEGER NOT NULL DEFAULT 0")
 
             share_cols = conn.execute("PRAGMA table_info(kb_share_requests)").fetchall()
             share_col_names = {r[1] for r in share_cols}
@@ -567,7 +569,9 @@ class PortalStore:
         return ""
 
     def get_all_users_with_ragflow_token(self) -> list[tuple[str, str, str]]:
-        """Returns [(user_id, ragflow_token, default_dept_id), ...] for all users with RAGFlow tokens."""
+        """Returns [(user_id, ragflow_token, default_dept_id), ...] for all users with RAGFlow tokens.
+        Admin users (MP, ADMIN) are returned first so they claim resource ownership before regular users.
+        """
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT u.user_id, u.ragflow_token,
@@ -576,6 +580,8 @@ class PortalStore:
                               LIMIT 1), 'dept_mp') as default_dept_id
                 FROM users u
                 WHERE u.ragflow_token IS NOT NULL AND u.ragflow_token != '' AND u.is_active = 1
+                ORDER BY CASE WHEN UPPER(u.login_id) LIKE '%ADMIN%' OR UPPER(u.login_id) = 'MP' THEN 0 ELSE 1 END,
+                         u.created_at ASC
             """).fetchall()
         return [(r["user_id"], r["ragflow_token"], r["default_dept_id"]) for r in rows]
 
@@ -994,6 +1000,103 @@ class PortalStore:
             return True
         return owner_dept == selected
 
+    def effective_kb_permission(
+        self,
+        user_dept_ids: set[str],
+        selected_dept_id: str,
+        kb_id: str,
+        user_id: str,
+        policy: dict[str, Any] | None = None,
+    ) -> int:
+        """Compute effective permission bitmask for a user on a KB.
+
+        Rules (Portal-side):
+        - Owner: full (read/write/share)
+        - Dept/policy visibility grants READ only
+        - kb_shares grants the stored bitmask (may include write/share)
+
+        Notes:
+        - This is a Portal authorization model; RAGFlow tenant access is handled separately.
+        """
+        kb_id = (kb_id or "").strip()
+        user_id = (user_id or "").strip()
+        if not kb_id or not user_id:
+            return 0
+
+        p = policy or self.get_policy("kb", kb_id)
+        owner_user_id = (p or {}).get("owner_user_id") or ""
+        if owner_user_id and owner_user_id == user_id:
+            return int(self.PERM_FULL)
+
+        mask = 0
+        if p and self.can_access_resource(user_dept_ids, selected_dept_id, p, user_id=user_id):
+            mask |= int(self.PERM_READ)
+
+        # user-level shares
+        mask |= int(self.get_kb_permission(kb_id, user_id) or 0)
+
+        # Defensive: ensure READ if any other bit exists
+        if mask and (mask & int(self.PERM_READ)) == 0:
+            mask |= int(self.PERM_READ)
+        return int(mask)
+
+    def can_read_kb(self, user_dept_ids: set[str], selected_dept_id: str, kb_id: str, user_id: str) -> bool:
+        return self.has_read(self.effective_kb_permission(user_dept_ids, selected_dept_id, kb_id, user_id))
+
+    def can_write_kb(self, user_dept_ids: set[str], selected_dept_id: str, kb_id: str, user_id: str) -> bool:
+        return self.has_write(self.effective_kb_permission(user_dept_ids, selected_dept_id, kb_id, user_id))
+
+    def can_share_kb(self, user_dept_ids: set[str], selected_dept_id: str, kb_id: str, user_id: str) -> bool:
+        return self.has_share(self.effective_kb_permission(user_dept_ids, selected_dept_id, kb_id, user_id))
+
+    def cascade_cleanup_kb(self, kb_id: str) -> dict[str, Any]:
+        """Cascade-clean Portal-side records related to a KB.
+
+        Intended to be called after the KB is deleted in RAGFlow, to avoid dangling
+        shares/requests/sessions/messages.
+        """
+        kb_id = (kb_id or "").strip()
+        if not kb_id:
+            return {"kb_id": kb_id, "deleted_kb_shares": 0, "deleted_share_requests": 0, "deactivated_sessions": 0, "deleted_messages": 0, "session_ids": []}
+
+        now = self._utc_now()
+        affected_session_ids: list[str] = []
+        deleted_messages = 0
+        with self._connect() as conn:
+            # Remove KB shares and share-requests outright (KB no longer exists)
+            cur1 = conn.execute("DELETE FROM kb_shares WHERE kb_id = ?", (kb_id,))
+            cur2 = conn.execute("DELETE FROM kb_share_requests WHERE kb_id = ?", (kb_id,))
+
+            # Deactivate portal sessions that referenced this KB and delete their messages
+            rows = conn.execute(
+                "SELECT session_id, kb_ids_json FROM portal_sessions WHERE is_active = 1 AND kb_ids_json IS NOT NULL AND kb_ids_json != '[]'"
+            ).fetchall()
+            for r in rows:
+                sid = r["session_id"]
+                try:
+                    kb_ids = json.loads(r["kb_ids_json"] or "[]")
+                except Exception:
+                    kb_ids = []
+                if kb_id in set(str(x) for x in (kb_ids or [])):
+                    affected_session_ids.append(sid)
+
+            for sid in affected_session_ids:
+                curm = conn.execute("DELETE FROM portal_messages WHERE session_id = ?", (sid,))
+                deleted_messages += int(curm.rowcount or 0)
+                conn.execute(
+                    "UPDATE portal_sessions SET is_active = 0, updated_at = ? WHERE session_id = ?",
+                    (now, sid),
+                )
+
+        return {
+            "kb_id": kb_id,
+            "deleted_kb_shares": int(cur1.rowcount or 0),
+            "deleted_share_requests": int(cur2.rowcount or 0),
+            "deactivated_sessions": len(affected_session_ids),
+            "deleted_messages": int(deleted_messages),
+            "session_ids": affected_session_ids,
+        }
+
     def write_audit(
         self,
         request_id: str,
@@ -1079,14 +1182,15 @@ class PortalStore:
         agent_id: str,
         kb_ids: list[str] | None = None,
         is_private: bool = False,
+        kb_overridden: bool = False,
     ) -> None:
         now = self._utc_now()
         kb_ids_json = json.dumps(kb_ids or [], ensure_ascii=False)
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO portal_sessions(session_id, user_id, dept_id, agent_id, kb_ids_json, is_private, created_at, updated_at, is_active)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1)
+                INSERT INTO portal_sessions(session_id, user_id, dept_id, agent_id, kb_ids_json, is_private, kb_overridden, created_at, updated_at, is_active)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     user_id = excluded.user_id,
@@ -1094,10 +1198,11 @@ class PortalStore:
                     agent_id = excluded.agent_id,
                     kb_ids_json = excluded.kb_ids_json,
                     is_private = excluded.is_private,
+                    kb_overridden = excluded.kb_overridden,
                     updated_at = excluded.updated_at,
                     is_active = 1
                 """,
-                (session_id, user_id, dept_id, agent_id, kb_ids_json, int(bool(is_private)), now, now),
+                (session_id, user_id, dept_id, agent_id, kb_ids_json, int(bool(is_private)), int(bool(kb_overridden)), now, now),
             )
 
     def get_portal_session(self, session_id: str) -> dict[str, Any] | None:
@@ -1116,6 +1221,7 @@ class PortalStore:
             data["kb_ids"] = json.loads(data.get("kb_ids_json") or "[]")
         except Exception:
             data["kb_ids"] = []
+        data["kb_overridden"] = bool(data.get("kb_overridden", 0))
         return data
 
     def append_portal_message(self, session_id: str, role: str, content: str, references: list[dict] | None = None) -> None:
@@ -1313,18 +1419,25 @@ class PortalStore:
         target_dept_ids: list[str] | None = None,
         target_user_id: str | None = None,
         reason: str = "",
+        requested_permission: int | None = None,
+        parent_share_id: int | None = None,
     ) -> dict[str, Any]:
         now = self._utc_now()
         req_id = self._new_id("shr_")
         target_ids = [self.normalize_dept_id(x) for x in (target_dept_ids or []) if str(x).strip()]
+        perm = int(requested_permission) if requested_permission is not None else int(self.PERM_READ)
+        # Ensure at least READ permission for any share request.
+        if (perm & self.PERM_READ) == 0:
+            perm |= int(self.PERM_READ)
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO kb_share_requests(
                     request_id, kb_id, owner_dept_id, requester_user_id,
                     target_scope, target_dept_ids_json, target_user_id, reason, status,
-                    reviewer_user_id, review_comment, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)
+                    reviewer_user_id, review_comment, created_at, updated_at,
+                    requested_permission, parent_share_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?)
                 """,
                 (
                     req_id, kb_id,
@@ -1335,6 +1448,8 @@ class PortalStore:
                     target_user_id,
                     reason,
                     now, now,
+                    perm,
+                    parent_share_id,
                 ),
             )
         return self.get_kb_share_request(req_id) or {}
@@ -1425,5 +1540,122 @@ class PortalStore:
                 WHERE request_id = ?
                 """,
                 (request_id,),
+            )
+        return cur.rowcount > 0
+
+    # ---- Recall Dashboard: list & selective revoke ----
+
+    def list_dept_shares_for_owner(self, owner_user_id: str) -> list[dict[str, Any]]:
+        """Return dept-level shares for all KBs owned by owner_user_id.
+
+        Each entry represents one department the KB has been shared to,
+        derived from resource_policies.allow_dept_ids_json.
+        """
+        with self._connect() as conn:
+            policies = conn.execute(
+                """
+                SELECT resource_id, allow_dept_ids_json
+                FROM resource_policies
+                WHERE resource_type = 'kb' AND owner_user_id = ? AND is_active = 1
+                """,
+                (owner_user_id,),
+            ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for p in policies:
+            kb_id = p["resource_id"]
+            allow_depts = []
+            try:
+                allow_depts = json.loads(p["allow_dept_ids_json"] or "[]")
+            except Exception:
+                pass
+            if not allow_depts:
+                continue
+            # Resolve dept info and permission mask
+            with self._connect() as conn:
+                for dept_id in allow_depts:
+                    dept_row = conn.execute(
+                        "SELECT dept_code, dept_name FROM departments WHERE dept_id = ?",
+                        (dept_id,),
+                    ).fetchone()
+                    # Get permission mask from any kb_shares record for users in this dept
+                    mask_row = conn.execute(
+                        """
+                        SELECT ks.permission_mask
+                        FROM kb_shares ks
+                        JOIN user_departments ud ON ks.target_user_id = ud.user_id AND ud.dept_id = ? AND ud.is_active = 1
+                        WHERE ks.kb_id = ? AND ks.status = 'approved'
+                        LIMIT 1
+                        """,
+                        (dept_id, kb_id),
+                    ).fetchone()
+                    results.append({
+                        "kb_id": kb_id,
+                        "dept_id": dept_id,
+                        "dept_code": (dept_row["dept_code"] if dept_row else dept_id),
+                        "dept_name": (dept_row["dept_name"] if dept_row else dept_id),
+                        "permission_mask": (mask_row["permission_mask"] if mask_row else self.PERM_READ),
+                    })
+        return results
+
+    def list_user_shares_for_owner(self, owner_user_id: str) -> list[dict[str, Any]]:
+        """Return individual user shares for all KBs owned by owner_user_id."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT ks.id, ks.kb_id, ks.target_user_id, ks.permission_mask, ks.status,
+                       u.login_id AS target_login, u.display_name AS target_name
+                FROM kb_shares ks
+                JOIN users u ON ks.target_user_id = u.user_id
+                JOIN resource_policies rp ON rp.resource_id = ks.kb_id
+                    AND rp.resource_type = 'kb' AND rp.is_active = 1
+                WHERE rp.owner_user_id = ? AND ks.status = 'approved'
+                ORDER BY ks.created_at DESC
+                """,
+                (owner_user_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def revoke_dept_share(self, kb_id: str, dept_id: str) -> bool:
+        """Revoke a specific department share: remove dept from allow_dept_ids and delete kb_shares for dept users."""
+        dept_id = self.normalize_dept_id(dept_id)
+        now = self._utc_now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT policy_id, allow_dept_ids_json FROM resource_policies WHERE resource_id = ? AND resource_type = 'kb' AND is_active = 1",
+                (kb_id,),
+            ).fetchone()
+            if not row:
+                return False
+            allow_depts: list[str] = []
+            try:
+                allow_depts = json.loads(row["allow_dept_ids_json"] or "[]")
+            except Exception:
+                pass
+            if dept_id in allow_depts:
+                allow_depts.remove(dept_id)
+            conn.execute(
+                "UPDATE resource_policies SET allow_dept_ids_json = ?, updated_at = ? WHERE policy_id = ?",
+                (json.dumps(allow_depts, ensure_ascii=False), now, row["policy_id"]),
+            )
+            # Remove kb_shares for users in that department
+            dept_users = conn.execute(
+                "SELECT user_id FROM user_departments WHERE dept_id = ? AND is_active = 1",
+                (dept_id,),
+            ).fetchall()
+            for u in dept_users:
+                conn.execute(
+                    "DELETE FROM kb_shares WHERE kb_id = ? AND target_user_id = ?",
+                    (kb_id, u["user_id"]),
+                )
+        return True
+
+    def revoke_user_share(self, share_id: int) -> bool:
+        """Revoke a single user share by its primary key ID."""
+        now = self._utc_now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE kb_shares SET status = 'revoked', updated_at = ? WHERE id = ? AND status = 'approved'",
+                (now, share_id),
             )
         return cur.rowcount > 0

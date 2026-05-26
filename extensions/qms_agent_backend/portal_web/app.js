@@ -61,18 +61,23 @@ const shareTargetWrap = document.getElementById("shareTargetWrap");
 const shareTargetPanel = document.getElementById("shareTargetPanel");
 const shareUserWrap = document.getElementById("shareUserWrap");
 const shareUserInput = document.getElementById("shareUserInput");
-const sharePermSelect = document.getElementById("sharePermSelect");
 const shareReasonInput = document.getElementById("shareReasonInput");
 const shareReqBtn = document.getElementById("shareReqBtn");
 const shareReqMsg = document.getElementById("shareReqMsg");
 
-// KB 撤销分享弹窗
+// KB 撤销分享弹窗（撤回分享看板）
 const kbUnshareModal = document.getElementById("kbUnshareModal");
 const openKbUnshareBtn = document.getElementById("openKbUnshareBtn");
 const closeKbUnshareBtn = document.getElementById("closeKbUnshareBtn");
-const unshareKbList = document.getElementById("unshareKbList");
-const unshareKbBtn = document.getElementById("unshareKbBtn");
+const recallDeptShares = document.getElementById("recallDeptShares");
+const recallUserShares = document.getElementById("recallUserShares");
+const refreshRecallBtn = document.getElementById("refreshRecallBtn");
 const unshareMsg = document.getElementById("unshareMsg");
+
+// 权限复选框
+const permReadCb = document.getElementById("permRead");
+const permWriteCb = document.getElementById("permWrite");
+const permShareCb = document.getElementById("permShare");
 
 // KB 删除弹窗
 const deleteKbModal = document.getElementById("deleteKbModal");
@@ -331,6 +336,74 @@ function agentName(agentId) {
   return agent ? agent.title : agentId;
 }
 
+function permissionLabel(permission) {
+  // permission can be a string ('read'|'share'|'write') or a bitmask number.
+  if (permission === null || permission === undefined) return "只读";
+  if (typeof permission === "string") {
+    const p = permission.toLowerCase();
+    if (p === "write") return "可改写+可分享";
+    if (p === "share") return "可分享";
+    return "只读";
+  }
+  const mask = Number(permission) || 0;
+  // bitmask: 4=read, 2=write, 1=share
+  if (mask & 2) return "可改写+可分享";
+  if (mask & 1) return "可分享";
+  return "只读";
+}
+
+/* ============================
+   权限复选框工具
+   ============================ */
+function getSharePermMask() {
+  let mask = 0;
+  if (permReadCb?.checked) mask |= 4;
+  if (permWriteCb?.checked) mask |= 2;
+  if (permShareCb?.checked) mask |= 1;
+  return mask;
+}
+
+function permMaskToLabel(mask) {
+  const parts = [];
+  if (mask & 4) parts.push("可读");
+  if (mask & 2) parts.push("可写");
+  if (mask & 1) parts.push("可分享");
+  return parts.join(" + ") || "无权限";
+}
+
+function permMaskToPermission(mask) {
+  // Map bitmask back to the permission string used by share-to-user API
+  if (mask & 2) return "write";
+  if (mask & 1) return "share";
+  return "read";
+}
+
+function updateSharePermCheckboxes() {
+  if (!shareKbSelect) return;
+  const kbId = shareKbSelect.value;
+  if (!kbId) return;
+  const kb = state.kbs.find(k => k.resource_id === kbId);
+  if (!kb) return;
+
+  const myPerm = kb.my_permission || 0;
+  const isOwner = kb.owner_user_id === state.me?.user_id;
+
+  // All three checkboxes are independently togglable
+  // For non-owners, disable checkboxes for permissions they don't have
+  if (permReadCb) { permReadCb.disabled = false; }
+  if (permWriteCb) { permWriteCb.disabled = false; }
+  if (permShareCb) { permShareCb.disabled = false; }
+
+  if (!isOwner) {
+    if (permWriteCb) {
+      if (!(myPerm & 2)) { permWriteCb.disabled = true; permWriteCb.checked = false; }
+    }
+    if (permShareCb) {
+      if (!(myPerm & 1)) { permShareCb.disabled = true; permShareCb.checked = false; }
+    }
+  }
+}
+
 function selectedKbIds() {
   const source = kbPanelMain;
   return [...source.querySelectorAll("input[type='checkbox']:checked")].map((x) => x.value);
@@ -456,7 +529,7 @@ function renderResources() {
     agentRadioPanel.innerHTML = "";
     const noneItem = document.createElement("label");
     noneItem.className = "config-item";
-    noneItem.innerHTML = `<input type="radio" name="agentChoice" value="" checked /> <span>不使用智能体（直连 GPT-5.4）</span>`;
+    noneItem.innerHTML = `<input type="radio" name="agentChoice" value="direct" checked /> <span>不使用智能体（直连 GPT-5.4）</span>`;
     agentRadioPanel.appendChild(noneItem);
     for (const a of state.agents) {
       const item = document.createElement("label");
@@ -518,25 +591,7 @@ function renderShareKbOptions() {
 }
 
 function renderUnshareKbOptions() {
-  if (!unshareKbList) return;
-  // Show KBs that the user owns AND have been shared (not private)
-  const visibleShared = state.kbs.filter((k) =>
-    k.owner_user_id === state.me?.user_id &&
-    (k.visibility !== "private" || (k.shares && k.shares.length > 0))
-  );
-  unshareKbList.innerHTML = "";
-  if (!visibleShared.length) {
-    unshareKbList.innerHTML = `<div class="title">当前无可撤销共享的知识库</div>`;
-    unshareKbBtn.disabled = true;
-    return;
-  }
-  unshareKbBtn.disabled = false;
-  for (const kb of visibleShared) {
-    const item = document.createElement("label");
-    item.className = "config-item";
-    item.innerHTML = `<input type="checkbox" value="${kb.resource_id}" /> <span>${getResourceTagHtml(kb)} ${kb.title}</span>`;
-    unshareKbList.appendChild(item);
-  }
+  // No-op: replaced by loadRecallDashboard()
 }
 
 function renderDeleteKbOptions() {
@@ -568,7 +623,7 @@ const sharePermWrap = document.getElementById("sharePermWrap");
 function renderShareTargetPanel() {
   const scope = shareScopeSelect.value;
   shareUserWrap?.classList.toggle("hidden", scope !== "user");
-  if (sharePermWrap) sharePermWrap.classList.toggle("hidden", scope !== "user");
+  if (sharePermWrap) sharePermWrap.classList.toggle("hidden", !["user", "dept"].includes(scope));
   shareTargetWrap?.classList.toggle("hidden", scope !== "dept");
   shareTargetPanel.innerHTML = "";
 
@@ -662,13 +717,14 @@ function renderShareRequests() {
     item.className = "share-request-item";
     const targets = (r.target_dept_ids || []).join(", ") || "MP";
     const targetUser = r.target_user_login ? ` | 账户：${r.target_user_login}` : "";
+    const permText = permissionLabel((r.requested_permission ?? r.permission));
     const statusCls = r.status === "pending" ? "tag-warning" : r.status === "approved" ? "tag-public" : "tag-private";
     item.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <strong>${kbNameById(r.kb_id)}</strong>
         <span class="tag ${statusCls}">${r.status}</span>
       </div>
-      <div class="share-request-meta">归属：${r.owner_dept_id} | 范围：${r.target_scope} | 目标：${targets}${targetUser}</div>
+      <div class="share-request-meta">归属：${r.owner_dept_id} | 范围：${r.target_scope} | 权限：${permText} | 目标：${targets}${targetUser}</div>
       <div class="share-request-meta">申请人：${r.requester_user_id} | 备注：${r.reason || "-"}</div>
     `;
     if (canReview && r.status === "pending") {
@@ -910,7 +966,7 @@ async function onRegister() {
 
 async function onCreateSession() {
   chatMsg.textContent = "";
-  const agentId = selectedAgentId();
+  const agentId = selectedAgentId() || "direct";
   const kbIds = selectedKbIds();
   const isPrivate = !!sessionPrivateToggle?.checked;
   const res = await apiJson("/portal/v1/sessions", {
@@ -926,7 +982,12 @@ async function onCreateSession() {
     chatMsg.textContent = res.message || "创建会话失败";
     return;
   }
-  await openSession(res.data.session_id, agentId, kbIds, !!res.data.is_private);
+  await openSession(
+    res.data.session_id,
+    res.data.agent_id || agentId,
+    res.data.kb_ids || kbIds,
+    !!res.data.is_private
+  );
   closeModal(configModal);
   closeSidebar();
 }
@@ -992,12 +1053,13 @@ async function onUploadKb() {
     return;
   }
   const formData = new FormData();
+  formData.append("dept_id", state.currentDeptId);
   formData.append("kb_name", name);
   if (kbPrivateToggle?.checked) formData.append("is_private", "1");
   const description = (kbDescInput?.value || "").trim();
   if (description) formData.append("description", description);
   for (let i = 0; i < files.length; i++) formData.append("files", files[i]);
-  const res = await fetch(`/portal/v1/kbs?dept_id=${encodeURIComponent(state.currentDeptId)}`, {
+  const res = await fetch(`/portal/v1/kbs`, {
     method: "POST",
     headers: { Authorization: `Bearer ${state.token}` },
     body: formData,
@@ -1017,22 +1079,26 @@ async function onUploadKb() {
 
 async function onCreateShareRequest() {
   shareReqMsg.textContent = "";
-  const kbId = shareKbSelect.value;
+  const kbId = shareKbSelect?.value;
   if (!kbId) {
     shareReqMsg.textContent = "请选择要分享的知识库";
     return;
   }
-  const scope = shareScopeSelect.value;
-  let targetUserLogin = "";
+  const scope = shareScopeSelect?.value;
+  const permMask = getSharePermMask();
+  if (permMask < 4) {
+    shareReqMsg.textContent = "至少需要勾选可读权限";
+    return;
+  }
+  const permission = permMaskToPermission(permMask);
 
   if (scope === "user") {
-    // Share to specific user (direct, no approval needed)
-    targetUserLogin = (shareUserInput?.value || "").trim();
+    // 点对点分享给个人
+    const targetUserLogin = (shareUserInput?.value || "").trim();
     if (!targetUserLogin) {
       shareReqMsg.textContent = "请输入目标账户名";
       return;
     }
-    const permission = sharePermSelect?.value || "read";
     const res = await apiJson(`/portal/v1/kbs/${encodeURIComponent(kbId)}/share-to-user`, {
       method: "POST",
       body: JSON.stringify({ target_user_login: targetUserLogin, permission }),
@@ -1041,60 +1107,125 @@ async function onCreateShareRequest() {
       shareReqMsg.textContent = res.message || "分享失败";
       return;
     }
-    // Check if it went through as direct share or pending approval
     if (res.data?.status === "pending") {
-      shareReqMsg.textContent = `已提交分享申请，等待管理员审批`;
+      shareReqMsg.textContent = `已提交分享申请，等待所有者审批`;
     } else {
-      shareReqMsg.textContent = `已分享给 ${targetUserLogin}（${permission === "write" ? "改写" : "只读"}）`;
+      shareReqMsg.textContent = `已分享给 ${targetUserLogin}（${permMaskToLabel(permMask)}）`;
     }
     if (shareUserInput) shareUserInput.value = "";
     setTimeout(() => { shareReqMsg.textContent = ""; }, 4000);
     await loadResources();
     return;
   }
-  const reason = shareReasonInput.value.trim();
-  // Get selected departments for "dept" scope
-  let targetDeptIds = [];
-  if (scope === "dept" && shareTargetPanel) {
-    targetDeptIds = [...shareTargetPanel.querySelectorAll("input[type='checkbox']:checked")].map(cb => cb.value);
+
+  if (scope === "dept") {
+    // 公开到部门（仅所有者可操作，直接分享无需审批）
+    let targetDeptIds = [];
+    if (shareTargetPanel) {
+      targetDeptIds = [...shareTargetPanel.querySelectorAll("input[type='checkbox']:checked")].map(cb => cb.value);
+    }
     if (!targetDeptIds.length) {
       shareReqMsg.textContent = "请选择目标部门";
       return;
     }
-  }
-  const reqBody = { target_scope: scope, reason };
-  if (targetUserLogin) reqBody.target_user_login = targetUserLogin;
-  if (targetDeptIds.length) reqBody.target_dept_ids = targetDeptIds;
-  const res = await apiJson(`/portal/v1/kbs/${encodeURIComponent(kbId)}/share-requests`, {
-    method: "POST",
-    body: JSON.stringify(reqBody),
-  });
-  if (!res.ok) {
-    shareReqMsg.textContent = res.message || "申请失败";
+    const res = await apiJson(`/portal/v1/kbs/${encodeURIComponent(kbId)}/share-to-depts`, {
+      method: "POST",
+      body: JSON.stringify({ dept_ids: targetDeptIds, permission_mask: permMask }),
+    });
+    if (!res.ok) {
+      shareReqMsg.textContent = res.message || "分享失败";
+      return;
+    }
+    shareReqMsg.textContent = `已分享到 ${targetDeptIds.length} 个部门（${permMaskToLabel(permMask)}）`;
+    setTimeout(() => { shareReqMsg.textContent = ""; }, 3000);
+    await loadResources();
     return;
   }
-  shareReqMsg.textContent = "申请已提交";
-  shareReasonInput.value = "";
-  setTimeout(() => { shareReqMsg.textContent = ""; }, 2000);
-  await loadShareRequests();
 }
 
 async function onUnshareKb() {
-  unshareMsg.textContent = "";
-  const selected = [...(unshareKbList?.querySelectorAll("input[type='checkbox']:checked") || [])].map((x) => x.value);
-  if (!selected.length) {
-    unshareMsg.textContent = "请选择要撤销分享的知识库";
+  // No-op: replaced by onRevokeSelective()
+}
+
+async function loadRecallDashboard() {
+  if (unshareMsg) unshareMsg.textContent = "";
+  if (recallDeptShares) recallDeptShares.innerHTML = '<div class="title">加载中...</div>';
+  if (recallUserShares) recallUserShares.innerHTML = '';
+
+  const res = await apiJson("/portal/v1/kbs/my-shares");
+  if (!res.ok) {
+    if (recallDeptShares) recallDeptShares.innerHTML = '<div class="title">加载失败</div>';
     return;
   }
-  for (const kbId of selected) {
-    const res = await apiJson(`/portal/v1/kbs/${encodeURIComponent(kbId)}/unshare`, { method: "POST" });
-    if (!res.ok) {
-      unshareMsg.textContent = res.message || "撤销失败";
-      return;
+
+  const deptShares = res.data?.dept_shares || [];
+  const userShares = res.data?.user_shares || [];
+
+  // Render department shares
+  if (recallDeptShares) {
+    recallDeptShares.innerHTML = "";
+    if (!deptShares.length) {
+      recallDeptShares.innerHTML = '<div class="title">暂无部门分享</div>';
+    } else {
+      for (const ds of deptShares) {
+        const row = document.createElement("div");
+        row.className = "recall-row";
+        const deptTag = getDeptTag(ds.dept_id);
+        row.innerHTML = `
+          <div class="recall-info">
+            <span class="recall-kb">${escapeHtml(ds.kb_id ? kbNameById(ds.kb_id) : "")}</span>
+            <span class="tag ${deptTag.cls}">${escapeHtml(ds.dept_code || ds.dept_id)}</span>
+            <span class="recall-perm">${permMaskToLabel(ds.permission_mask)}</span>
+          </div>
+          <button class="btn btn-danger small recall-revoke-btn">撤回</button>
+        `;
+        row.querySelector(".recall-revoke-btn").onclick = async () => {
+          await onRevokeSelective(ds.kb_id, "dept", ds.dept_id);
+        };
+        recallDeptShares.appendChild(row);
+      }
     }
   }
-  unshareMsg.textContent = "撤销成功";
-  setTimeout(() => { unshareMsg.textContent = ""; }, 2000);
+
+  // Render individual user shares
+  if (recallUserShares) {
+    recallUserShares.innerHTML = "";
+    if (!userShares.length) {
+      recallUserShares.innerHTML = '<div class="title">暂无个人分享</div>';
+    } else {
+      for (const us of userShares) {
+        const row = document.createElement("div");
+        row.className = "recall-row";
+        row.innerHTML = `
+          <div class="recall-info">
+            <span class="recall-kb">${escapeHtml(us.kb_id ? kbNameById(us.kb_id) : "")}</span>
+            <span class="recall-user">${escapeHtml(us.target_login || us.target_user_id)}</span>
+            <span class="recall-perm">${permMaskToLabel(us.permission_mask)}</span>
+          </div>
+          <button class="btn btn-danger small recall-revoke-btn">撤回</button>
+        `;
+        row.querySelector(".recall-revoke-btn").onclick = async () => {
+          await onRevokeSelective(us.kb_id, "user", String(us.id));
+        };
+        recallUserShares.appendChild(row);
+      }
+    }
+  }
+}
+
+async function onRevokeSelective(kbId, revokeType, targetId) {
+  if (unshareMsg) unshareMsg.textContent = "";
+  const res = await apiJson(`/portal/v1/kbs/${encodeURIComponent(kbId)}/revoke-selective`, {
+    method: "POST",
+    body: JSON.stringify({ revoke_type: revokeType, target_id: targetId }),
+  });
+  if (!res.ok) {
+    if (unshareMsg) unshareMsg.textContent = res.message || "撤回失败";
+    return;
+  }
+  if (unshareMsg) unshareMsg.textContent = "已撤回";
+  setTimeout(() => { if (unshareMsg) unshareMsg.textContent = ""; }, 2000);
+  await loadRecallDashboard();
   await loadResources();
 }
 
@@ -1251,7 +1382,7 @@ if (kbNameInput) {
 }
 
 // KB 分享弹窗
-if (openKbShareBtn) openKbShareBtn.onclick = () => { shareReqMsg.textContent = ""; openModal(kbShareModal); };
+if (openKbShareBtn) openKbShareBtn.onclick = () => { shareReqMsg.textContent = ""; openModal(kbShareModal); updateSharePermCheckboxes(); updateShareBtnText(); };
 if (openKbChainBtn) openKbChainBtn.onclick = () => { if (chainMsg) chainMsg.textContent = ""; chainView.innerHTML = ""; populateChainKbSelect(); openModal(kbChainModal); };
 if (closeKbChainBtn) closeKbChainBtn.onclick = () => closeModal(kbChainModal);
 if (chainKbSelect) chainKbSelect.onchange = () => loadShareChain(chainKbSelect.value);
@@ -1365,7 +1496,16 @@ async function loadShareChain(kbId) {
 }
 if (closeKbShareBtn) closeKbShareBtn.onclick = () => closeModal(kbShareModal);
 if (shareReqBtn) shareReqBtn.onclick = onCreateShareRequest;
-if (shareScopeSelect) shareScopeSelect.onchange = renderShareTargetPanel;
+if (shareKbSelect) shareKbSelect.onchange = () => { renderShareTargetPanel(); updateSharePermCheckboxes(); };
+if (shareScopeSelect) shareScopeSelect.onchange = () => { renderShareTargetPanel(); updateShareBtnText(); };
+
+
+function updateShareBtnText() {
+  if (!shareReqBtn || !shareScopeSelect) return;
+  const scope = shareScopeSelect.value;
+  if (scope === "dept") shareReqBtn.textContent = "分享到部门";
+  else shareReqBtn.textContent = "申请分享";
+}
 
 // 用户搜索模糊匹配
 const shareUserDropdown = document.getElementById("shareUserDropdown");
@@ -1397,10 +1537,10 @@ if (shareUserInput) {
   };
 }
 
-// KB 撤销分享弹窗
-if (openKbUnshareBtn) openKbUnshareBtn.onclick = () => { unshareMsg.textContent = ""; openModal(kbUnshareModal); };
+// KB 撤销分享弹窗（撤回分享看板）
+if (openKbUnshareBtn) openKbUnshareBtn.onclick = () => { if (unshareMsg) unshareMsg.textContent = ""; loadRecallDashboard(); openModal(kbUnshareModal); };
 if (closeKbUnshareBtn) closeKbUnshareBtn.onclick = () => closeModal(kbUnshareModal);
-if (unshareKbBtn) unshareKbBtn.onclick = onUnshareKb;
+if (refreshRecallBtn) refreshRecallBtn.onclick = loadRecallDashboard;
 
 // KB 删除弹窗
 if (openDeleteKbBtn) openDeleteKbBtn.onclick = () => { if (deleteKbMsg) deleteKbMsg.textContent = ""; openModal(deleteKbModal); };

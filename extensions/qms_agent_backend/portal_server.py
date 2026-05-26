@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import io
@@ -49,6 +50,31 @@ def _extract_kb_ids_from_dsl(dsl, max_depth: int = 10) -> list[str]:
     return list(dict.fromkeys(result))  # deduplicate, preserve order
 
 
+def _patch_dsl_kb_ids(dsl: dict, new_kb_ids: list[str]) -> dict:
+    """深拷贝 DSL 并替换所有 Retrieval 组件中的 kb_ids / dataset_ids。"""
+    patched = copy.deepcopy(dsl)
+    components = patched.get("components", {})
+    for comp in components.values():
+        obj = comp.get("obj", {})
+        params = obj.get("params", {})
+        comp_name = obj.get("component_name", "")
+        # Pattern A: 独立 Retrieval 组件
+        if comp_name == "Retrieval":
+            params["kb_ids"] = list(new_kb_ids)
+            params["dataset_ids"] = list(new_kb_ids)
+        # Pattern B: Agent 组件内嵌的 Retrieval tool
+        tools = params.get("tools", [])
+        if isinstance(tools, list):
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool_params = tool.get("params", {})
+                    tool_name = tool.get("component_name", "")
+                    if tool_name == "Retrieval":
+                        tool_params["kb_ids"] = list(new_kb_ids)
+                        tool_params["dataset_ids"] = list(new_kb_ids)
+    return patched
+
+
 # RSA public key for RAGFlow user registration password encryption
 _RAGFLOW_RSA_PUB_KEY = """-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArq9XTUSeYr2+N1h3Afl/z8Dse/2yD0ZGrKwx+EEEcdsBLca9Ynmx3nIB5obmLlSfmskLpBo0UACBmB5rEjBp2Q2f3AG3Hjd4B+gNCG6BDaawuDlgANIhGnaTLrIqWrrcm4EMzJOnAOI1fgzJRsOOUEfaS318Eq9OVO3apEyCCt0lOQK6PuksduOjVxtltDav+guVAA068NrPYmRNabVKRNLJpL8w4D44sfth5RvZ3q9t+6RTArpEtc5sh5ChzvqPOzKGMXW83C95TxmXqpbK6olN4RevSfVjEAgCydH6HN6OhtOQEcnrU97r9H0iZOWwbw3pVrZiUkuRD1R56Wzs2wIDAQAB
@@ -57,8 +83,18 @@ MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArq9XTUSeYr2+N1h3Afl/z8Dse/2yD0ZGrKwx
 
 def _encrypt_password_for_ragflow(password_plain: str) -> str:
     """RSA-encrypt password for RAGFlow /v1/user/register endpoint."""
-    from Crypto.PublicKey import RSA
-    from Crypto.Cipher import PKCS1_v1_5
+    try:
+        from Crypto.PublicKey import RSA  # type: ignore[import-not-found]
+        from Crypto.Cipher import PKCS1_v1_5  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        # Some environments use the pycryptodomex namespace.
+        try:
+            from Cryptodome.PublicKey import RSA  # type: ignore[import-not-found]
+            from Cryptodome.Cipher import PKCS1_v1_5  # type: ignore[import-not-found]
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Missing dependency for registration password encryption. Install 'pycryptodome' (or 'pycryptodomex')."
+            ) from e
 
     rsa_key = RSA.importKey(_RAGFLOW_RSA_PUB_KEY)
     cipher = PKCS1_v1_5.new(rsa_key)
@@ -553,10 +589,8 @@ class PortalGateway:
                         "allow_roles_json": "[]",
                         "category": "A",
                     }
-                # Check access: dept-level via policy, user-level via kb_shares
-                has_dept_access = self.store.can_access_resource(depts, selected_dept, policy, user_id=user_id)
-                my_perm = self.store.has_kb_access(ds.id, user_id)
-                if not has_dept_access and my_perm == 0:
+                my_perm = int(self.store.effective_kb_permission(depts, selected_dept, ds.id, str(user_id or ""), policy=policy))
+                if not self.store.has_read(my_perm):
                     continue
                 allow_depts = json.loads((policy or {}).get("allow_dept_ids_json") or "[]")
                 owner_uid = (policy or {}).get("owner_user_id") or ""
@@ -597,12 +631,20 @@ class PortalGateway:
 
         if not agent_id:
             session_id = f"direct-{uuid.uuid4().hex}"
+            # Validate user-selected kb_ids for direct mode
+            valid_kb_ids: list[str] = []
+            for kb_id in (kb_ids or []):
+                p = self.store.get_policy("kb", kb_id)
+                eff = int(self.store.effective_kb_permission(depts, dept_id, kb_id, str(user_id or ""), policy=p))
+                if self.store.has_read(eff):
+                    valid_kb_ids.append(kb_id)
             self._session_registry[session_id] = {
                 "session": None,
                 "user_id": user_id,
                 "dept_id": dept_id,
                 "agent_id": "direct",
-                "kb_ids": [],
+                "kb_ids": valid_kb_ids,
+                "agent_owner_id": "",
                 "created_at": int(time.time()),
                 "is_private": bool(is_private),
             }
@@ -611,26 +653,20 @@ class PortalGateway:
                 user_id,
                 dept_id,
                 "direct",
-                kb_ids=[],
+                kb_ids=valid_kb_ids,
                 is_private=bool(is_private),
             )
             return {
                 "session_id": session_id,
                 "agent_id": "direct",
                 "dept_id": dept_id,
-                "kb_ids": [],
+                "kb_ids": valid_kb_ids,
                 "is_private": bool(is_private),
             }
 
         policy = self.store.get_policy("agent", agent_id)
         if not self.store.can_access_resource(depts, dept_id, policy, user_id=user_id):
             raise PermissionError("resource forbidden")
-
-        clean_kb_ids: list[str] = []
-        for kb_id in (kb_ids or []):
-            p = self.store.get_policy("kb", kb_id)
-            if p and self.store.can_access_resource(depts, dept_id, p, user_id=user_id):
-                clean_kb_ids.append(kb_id)
 
         # Find agent owner to use their RAGFlow client
         agent_owner_id = (policy or {}).get("owner_user_id") or ""
@@ -641,8 +677,23 @@ class PortalGateway:
             raise ValueError("agent not found")
         agent = agents[0]
 
-        # If user didn't select KBs, extract dataset IDs from agent's DSL
-        if not clean_kb_ids:
+        # User-selected kb_ids take priority; fall back to agent DSL only when user selected none
+        user_selected = bool(kb_ids)
+        clean_kb_ids: list[str] = []
+        if user_selected:
+            for kb_id in kb_ids:
+                p = self.store.get_policy("kb", kb_id)
+                eff = int(self.store.effective_kb_permission(depts, dept_id, kb_id, str(user_id or ""), policy=p))
+                can_read = self.store.has_read(eff)
+                print(
+                    f"[PORTAL DEBUG] KB access check: {kb_id[:12]}... policy={'YES' if p else 'NO'} eff_perm={eff}"
+                )
+                if can_read:
+                    clean_kb_ids.append(kb_id)
+        print(f"[PORTAL DEBUG] create_session: user_selected={user_selected}, input_kb_ids={len(kb_ids or [])}, clean_kb_ids={len(clean_kb_ids)}")
+
+        # Only extract from agent DSL when user didn't select any KBs at all
+        if not user_selected and not clean_kb_ids:
             try:
                 agent_detail = agent_rag.list_agents(page=1, page_size=1, id=agent_id)
                 if agent_detail:
@@ -660,6 +711,7 @@ class PortalGateway:
             "agent_id": agent_id,
             "kb_ids": clean_kb_ids,
             "agent_owner_id": agent_owner_id,
+            "kb_overridden": user_selected and bool(clean_kb_ids),
             "created_at": int(time.time()),
         }
         self.store.create_portal_session(
@@ -669,6 +721,7 @@ class PortalGateway:
             agent_id,
             kb_ids=clean_kb_ids,
             is_private=bool(is_private),
+            kb_overridden=bool(user_selected and clean_kb_ids),
         )
         return {
             "session_id": session.id,
@@ -823,6 +876,7 @@ class PortalGateway:
         target_dept_ids: list[str] | None = None,
         target_user_login: str | None = None,
         reason: str = "",
+        permission: str = "read",
     ) -> dict[str, Any]:
         user_id = token_payload.get("sub") or ""
         if not user_id:
@@ -846,6 +900,7 @@ class PortalGateway:
 
         normalized_targets: list[str] = []
         target_user_id = None
+        requested_permission = self.store.PERM_READ
         if scope == "user":
             if not target_user_login:
                 raise ValueError("target_user_login is required for user scope")
@@ -853,6 +908,13 @@ class PortalGateway:
             if not user_row or int(user_row.get("is_active") or 0) != 1:
                 raise ValueError("target_user_login not found")
             target_user_id = user_row.get("user_id")
+            perm = (permission or "read").strip().lower()
+            if perm == "write":
+                requested_permission = self.store.PERM_READ | self.store.PERM_WRITE | self.store.PERM_SHARE
+            elif perm == "share":
+                requested_permission = self.store.PERM_READ | self.store.PERM_SHARE
+            else:
+                requested_permission = self.store.PERM_READ
         elif scope == "dept":
             normalized_targets = [self._normalize_dept_id(x) for x in (target_dept_ids or []) if str(x).strip()]
             if not normalized_targets:
@@ -866,6 +928,8 @@ class PortalGateway:
             target_dept_ids=normalized_targets,
             target_user_id=target_user_id,
             reason=reason,
+            requested_permission=int(requested_permission),
+            parent_share_id=None,
         )
 
     def share_kb_internal(self, token_payload: dict[str, Any], kb_id: str) -> dict[str, Any]:
@@ -918,6 +982,10 @@ class PortalGateway:
         visibility = (policy.get("visibility") or "dept").lower()
         is_owner = owner_user_id == user_id
 
+        # Private KB: only owner can share
+        if visibility == "private" and not is_owner:
+            raise PermissionError("仅知识库所有者可分享私密知识库")
+
         # Check re-share permission: only owner or share-permission holders can share
         if not is_owner:
             my_perm = self.store.get_kb_permission(kb_id, user_id)
@@ -935,15 +1003,32 @@ class PortalGateway:
         # Non-owner + non-private KB → requires owner approval
         if not is_owner and visibility != "private":
             owner_dept = self._normalize_dept_id(policy.get("owner_dept_id") or "")
-            request_id = self.store.create_kb_share_request(
+            # Convert permission string to bitmask
+            perm_mask = self.store.PERM_READ
+            if permission == "write":
+                perm_mask = self.store.PERM_READ | self.store.PERM_WRITE | self.store.PERM_SHARE
+            elif permission == "share":
+                perm_mask = self.store.PERM_READ | self.store.PERM_SHARE
+
+            parent_share_id = None
+            with self.store._connect() as conn:
+                parent_row = conn.execute(
+                    "SELECT id FROM kb_shares WHERE kb_id = ? AND target_user_id = ? AND status = 'approved'",
+                    (kb_id, user_id),
+                ).fetchone()
+                parent_share_id = parent_row["id"] if parent_row else None
+
+            req = self.store.create_kb_share_request(
                 kb_id=kb_id,
                 owner_dept_id=owner_dept,
                 requester_user_id=user_id,
                 target_scope="user",
                 target_user_id=target_user_id,
                 reason=f"分享给 {target_user_login}（{permission}权限），需所有者审批",
+                requested_permission=int(perm_mask),
+                parent_share_id=parent_share_id,
             )
-            return {"request_id": request_id, "status": "pending", "message": "分享申请已提交，等待所有者审批"}
+            return {"request_id": req.get("request_id"), "status": "pending", "message": "分享申请已提交，等待所有者审批"}
 
         # Find target user
         target = self.store.get_user_by_login(target_user_login)
@@ -1086,7 +1171,16 @@ class PortalGateway:
             elif target_scope == "user":
                 target_user_id = req.get("target_user_id")
                 if target_user_id:
-                    perm_mask = req.get("requested_permission", self.store.PERM_READ)
+                    perm_mask = int(req.get("requested_permission", self.store.PERM_READ))
+                    sharer_user_id = req.get("requester_user_id") or ""
+                    sharer_cap = int(self.store.has_kb_access(req["kb_id"], sharer_user_id))
+                    if sharer_cap <= 0:
+                        # Dept-admin initiated shares may not have a share record; allow READ-only fallback.
+                        sharer_cap = int(self.store.PERM_READ)
+                    if (perm_mask & int(self.store.PERM_READ)) == 0:
+                        perm_mask |= int(self.store.PERM_READ)
+                    if (perm_mask | sharer_cap) != sharer_cap:
+                        raise PermissionError("申请的分享权限超过了发起人可分享的权限范围")
                     parent_id = req.get("parent_share_id")
                     self.store.add_kb_share(
                         req["kb_id"], target_user_id, perm_mask,
@@ -1158,6 +1252,123 @@ class PortalGateway:
         row = self.store.get_policy("kb", kb_id)
         return row or {}
 
+    # ---- Recall Dashboard: share-to-depts, list-all-shares, selective-revoke ----
+
+    def share_kb_to_depts(self, token_payload: dict[str, Any], kb_id: str, dept_ids: list[str], permission_mask: int) -> dict[str, Any]:
+        """Share a KB to multiple departments. Owner-only action."""
+        user_id = token_payload.get("sub") or ""
+        if not user_id:
+            raise PermissionError("unauthorized")
+        policy = self.store.get_policy("kb", kb_id)
+        if not policy:
+            raise ValueError("kb not found")
+        owner_user_id = policy.get("owner_user_id") or ""
+        if owner_user_id != user_id:
+            raise PermissionError("只有知识库所有者才能分享到部门")
+        if not isinstance(permission_mask, int) or permission_mask < self.store.PERM_READ:
+            raise ValueError("permission_mask must be an integer >= 4 (at least READ)")
+
+        owner_dept = self._normalize_dept_id(policy.get("owner_dept_id") or "")
+        existing_allow: list[str] = []
+        try:
+            existing_allow = json.loads(policy.get("allow_dept_ids_json") or "[]")
+        except Exception:
+            pass
+
+        normalized_new: list[str] = []
+        for d in (dept_ids or []):
+            nd = self._normalize_dept_id(str(d).strip())
+            if nd and nd not in existing_allow:
+                normalized_new.append(nd)
+
+        merged = sorted(set(existing_allow + normalized_new))
+
+        # Update policy
+        self.store.upsert_policy(
+            resource_type="kb",
+            resource_id=kb_id,
+            owner_dept_id=owner_dept,
+            visibility=policy.get("visibility") or "dept",
+            created_by=user_id,
+            owner_user_id=owner_user_id,
+            allow_dept_ids=merged,
+            deny_dept_ids=[self._normalize_dept_id(x) for x in json.loads(policy.get("deny_dept_ids_json") or "[]")],
+            allow_roles=[str(x) for x in json.loads(policy.get("allow_roles_json") or "[]")],
+            category=(policy.get("category") or "D"),
+        )
+
+        # Create kb_shares for all users in new departments
+        for dept_id in normalized_new:
+            dept_users = self.store.get_users_in_dept(dept_id)
+            for dept_user in dept_users:
+                if dept_user["user_id"] != owner_user_id:
+                    self.store.add_kb_share(
+                        kb_id, dept_user["user_id"], permission_mask, owner_user_id,
+                    )
+
+        return self.store.get_policy("kb", kb_id) or {}
+
+    def list_all_shares(self, token_payload: dict[str, Any]) -> dict[str, Any]:
+        """Return both dept-level and individual user shares for the current user's owned KBs."""
+        user_id = token_payload.get("sub") or ""
+        if not user_id:
+            raise PermissionError("unauthorized")
+        dept_shares = self.store.list_dept_shares_for_owner(user_id)
+        user_shares = self.store.list_user_shares_for_owner(user_id)
+        return {"dept_shares": dept_shares, "user_shares": user_shares}
+
+    def selective_revoke(self, token_payload: dict[str, Any], kb_id: str, revoke_type: str, target_id: str) -> dict[str, Any]:
+        """Revoke a specific share: either a dept share or an individual user share."""
+        user_id = token_payload.get("sub") or ""
+        if not user_id:
+            raise PermissionError("unauthorized")
+        policy = self.store.get_policy("kb", kb_id)
+        if not policy:
+            raise ValueError("kb not found")
+        owner_user_id = policy.get("owner_user_id") or ""
+        if owner_user_id != user_id:
+            raise PermissionError("只有知识库所有者才能撤回分享")
+
+        if revoke_type == "dept":
+            ok = self.store.revoke_dept_share(kb_id, target_id)
+            if not ok:
+                raise ValueError("dept share not found")
+        elif revoke_type == "user":
+            try:
+                share_id = int(target_id)
+            except (ValueError, TypeError):
+                raise ValueError("target_id must be a valid share ID")
+            ok = self.store.revoke_user_share(share_id)
+            if not ok:
+                raise ValueError("user share not found")
+        else:
+            raise ValueError("revoke_type must be 'dept' or 'user'")
+
+        # Check if any shares remain; if none, optionally revert visibility
+        remaining_policy = self.store.get_policy("kb", kb_id) or {}
+        remaining_allow: list[str] = []
+        try:
+            remaining_allow = json.loads(remaining_policy.get("allow_dept_ids_json") or "[]")
+        except Exception:
+            pass
+        remaining_shares = self.store.list_kb_shares(kb_id)
+        if not remaining_allow and not remaining_shares:
+            owner_dept = self._normalize_dept_id(policy.get("owner_dept_id") or "")
+            self.store.upsert_policy(
+                resource_type="kb",
+                resource_id=kb_id,
+                owner_dept_id=owner_dept,
+                visibility="private",
+                created_by=user_id,
+                owner_user_id=owner_user_id,
+                allow_dept_ids=[],
+                deny_dept_ids=[],
+                allow_roles=[],
+                category=(policy.get("category") or "D"),
+            )
+
+        return {"ok": True, "kb_id": kb_id, "revoke_type": revoke_type, "target_id": target_id}
+
     def delete_private_kb(self, token_payload: dict[str, Any], kb_id: str) -> bool:
         """Delete a private KB. Only the owner can delete."""
         user_id = token_payload.get("sub") or ""
@@ -1181,9 +1392,11 @@ class PortalGateway:
             json={"ids": [kb_id]},
             timeout=30,
         )
-        # Clean up shares
-        for s in self.store.list_kb_shares(kb_id):
-            self.store.remove_kb_share(kb_id, s["target_user_id"])
+
+        cleanup = self.store.cascade_cleanup_kb(kb_id)
+        # Clean in-memory sessions that referenced this KB
+        for sid in cleanup.get("session_ids") or []:
+            self._session_registry.pop(str(sid), None)
         self.store.deactivate_policy("kb", kb_id)
         return True
 
@@ -1193,6 +1406,9 @@ class PortalGateway:
             raise PermissionError("unauthorized")
         is_mp = self.store.is_dept_admin(user_id, "dept_mp")
         deleted: list[str] = []
+        cleanup_stats: list[dict[str, Any]] = []
+        depts = {self._normalize_dept_id(x) for x in (token_payload.get("dept_ids") or [])}
+        selected_dept = self._normalize_dept_id(token_payload.get("default_dept_id") or "")
         for kb_id in kb_ids:
             policy = self.store.get_policy("kb", kb_id)
             if not policy:
@@ -1203,7 +1419,7 @@ class PortalGateway:
 
             # Check permission: read-only → only owner; read-write → owner + write users
             if not is_mp and not is_owner:
-                perm = self.store.get_kb_permission(kb_id, user_id)
+                perm = int(self.store.effective_kb_permission(depts, selected_dept, kb_id, user_id, policy=policy))
                 if not self.store.has_write(perm):
                     raise PermissionError("只有所有者或可改写权限用户才能删除")
 
@@ -1215,13 +1431,14 @@ class PortalGateway:
                 json={"ids": [kb_id]},
                 timeout=30,
             )
-            # Remove all share records for this KB
-            shares = self.store.list_kb_shares(kb_id)
-            for s in shares:
-                self.store.remove_kb_share(kb_id, s["target_user_id"])
+
+            cleanup = self.store.cascade_cleanup_kb(kb_id)
+            cleanup_stats.append(cleanup)
+            for sid in cleanup.get("session_ids") or []:
+                self._session_registry.pop(str(sid), None)
             self.store.deactivate_policy("kb", kb_id)
             deleted.append(kb_id)
-        return {"deleted": deleted}
+        return {"deleted": deleted, "cleanup": cleanup_stats}
 
     def _multi_tenant_retrieve(self, kb_ids: list[str], question: str, top_k: int = 8, agent_owner_id: str = "") -> list[dict[str, Any]]:
         """Retrieve chunks from multiple RAGFlow accounts based on KB ownership.
@@ -1235,6 +1452,7 @@ class PortalGateway:
         for kb_id in kb_ids:
             policy = self.store.get_policy("kb", kb_id)
             if not policy:
+                print(f"[PORTAL DEBUG] retrieve: kb_id={kb_id[:12]}... NO POLICY FOUND")
                 continue
             owner_user_id = policy.get("owner_user_id") or ""
             if not owner_user_id and agent_owner_id:
@@ -1246,6 +1464,8 @@ class PortalGateway:
                 owner_token = self.store.get_user_ragflow_token(agent_owner_id)
             if not owner_token:
                 owner_token = self.cfg.api_key  # fallback to shared admin
+            masked = (owner_token[:8] + "...") if owner_token else "EMPTY"
+            print(f"[PORTAL DEBUG] retrieve: kb_id={kb_id[:12]}... owner={owner_user_id[:12] if owner_user_id else 'NONE'} token={masked}")
             token_groups.setdefault(owner_token, []).append(kb_id)
 
         # Retrieve from each tenant
@@ -1258,7 +1478,9 @@ class PortalGateway:
                     question=question,
                     page_size=top_k,
                 )
-                for c in chunks:
+                chunk_list = list(chunks) if chunks else []
+                print(f"[PORTAL DEBUG] retrieve: token={ragflow_token[:8]}... ds_ids={len(ds_ids)} chunks={len(chunk_list)}")
+                for c in chunk_list:
                     chunk_dict = {
                         "content": getattr(c, "content", "") or "",
                         "document_name": getattr(c, "document_name", "") or "",
@@ -1268,11 +1490,12 @@ class PortalGateway:
                     if chunk_dict["content"]:
                         all_chunks.append(chunk_dict)
             except Exception as e:
-                print(f"[PORTAL WARN] Retrieval failed for token group: {e}")
+                print(f"[PORTAL ERROR] Retrieval failed for token={ragflow_token[:8]}... ds_ids={ds_ids}: {e}")
                 continue
 
         # Sort by similarity and take top_k
         all_chunks.sort(key=lambda x: x.get("similarity") or 0, reverse=True)
+        print(f"[PORTAL DEBUG] retrieve total: {len(all_chunks)} chunks from {len(kb_ids)} KBs")
         return all_chunks[:top_k]
 
     def _generate_answer(self, question: str, chunks: list[dict[str, Any]], history: list[dict[str, str]] | None = None) -> str:
@@ -1312,6 +1535,22 @@ class PortalGateway:
             print(f"[PORTAL ERROR] LLM generation failed: {e}")
             return f"**回答生成失败**: {str(e)}"
 
+    def _recover_agent_session(self, agent_id: str, session_id: str, agent_owner_id: str = ""):
+        """服务器重启后尝试恢复 RAGFlow Session 对象。"""
+        try:
+            agent_rag = self.get_rag_client(agent_owner_id) if agent_owner_id else self.rag
+            agents = agent_rag.list_agents(page=1, page_size=1, id=agent_id)
+            if not agents:
+                return None
+            sessions = agents[0].list_sessions(page=1, page_size=100, id=session_id)
+            for s in sessions:
+                if s.id == session_id:
+                    return s
+            return None
+        except Exception as e:
+            print(f"[PORTAL WARN] Session recovery failed for {session_id}: {e}")
+            return None
+
     def _load_session(self, session_id: str) -> dict | None:
         """从内存或 SQLite 加载会话，确保 agent_owner_id 存在。"""
         reg = self._session_registry.get(session_id)
@@ -1323,11 +1562,13 @@ class PortalGateway:
         agent_id = persisted["agent_id"]
         agent_policy = self.store.get_policy("agent", agent_id) if agent_id and agent_id != "direct" else None
         reg = {
+            "session": None,
             "user_id": persisted["user_id"],
             "dept_id": persisted["dept_id"],
             "agent_id": agent_id,
             "kb_ids": persisted.get("kb_ids", []),
             "agent_owner_id": (agent_policy or {}).get("owner_user_id", ""),
+            "kb_overridden": persisted.get("kb_overridden", False),
         }
         self._session_registry[session_id] = reg
         return reg
@@ -1342,41 +1583,116 @@ class PortalGateway:
             raise ValueError("question is required")
 
         if reg["agent_id"] == "direct":
-            history = self.store.list_portal_messages(session_id, limit=12)
-            messages = []
-            for m in history:
-                if m.get("role") in {"user", "assistant"}:
-                    messages.append({"role": m.get("role"), "content": m.get("content")})
-            messages.append({"role": "user", "content": question})
-            answer = self._direct_chat(messages)
-            references = []
-        else:
-            # Portal 自主检索 + 回答：从多个 RAGFlow 租户检索，汇总后调 LLM
+            # Direct mode: use retrieval pipeline when user selected knowledge bases
             kb_ids = reg.get("kb_ids", [])
-            agent_owner_id = reg.get("agent_owner_id", "")
             if kb_ids:
-                # Multi-tenant retrieval (use agent owner's client for agent KBs)
-                chunks = self._multi_tenant_retrieve(kb_ids, question, agent_owner_id=agent_owner_id)
-                # Build history for context
+                chunks = self._multi_tenant_retrieve(kb_ids, question)
                 hist_msgs = self.store.list_portal_messages(session_id, limit=6)
                 history = []
                 for m in hist_msgs:
                     if m.get("role") in {"user", "assistant"}:
                         history.append({"role": m.get("role"), "content": m.get("content")})
-                # Generate answer
                 answer = self._generate_answer(question, chunks, history)
                 references = chunks
-                print(f"[PORTAL DEBUG] retrieved {len(chunks)} chunks from {len(kb_ids)} KBs")
+                print(f"[PORTAL DEBUG] direct+kb: retrieved {len(chunks)} chunks from {len(kb_ids)} KBs")
             else:
-                # No KBs: direct chat without context
-                history_msgs = self.store.list_portal_messages(session_id, limit=12)
+                history = self.store.list_portal_messages(session_id, limit=12)
                 messages = []
-                for m in history_msgs:
+                for m in history:
                     if m.get("role") in {"user", "assistant"}:
                         messages.append({"role": m.get("role"), "content": m.get("content")})
                 messages.append({"role": "user", "content": question})
                 answer = self._direct_chat(messages)
                 references = []
+        else:
+            # Agent 模式
+            kb_ids = reg.get("kb_ids", [])
+            kb_overridden = reg.get("kb_overridden", False)
+            print(f"[PORTAL DEBUG] Agent mode: kb_overridden={kb_overridden}, kb_count={len(kb_ids)}")
+
+            if kb_overridden and kb_ids:
+                # 用户选了知识库 → 检索仍由 portal 完成，但回答走智能体工作流。
+                print(f"[PORTAL DEBUG] Agent+KB: retrieving {len(kb_ids)} KBs then calling agent workflow")
+                chunks = self._multi_tenant_retrieve(kb_ids, question, agent_owner_id=reg.get("agent_owner_id", ""))
+
+                context_lines: list[str] = []
+                for i, c in enumerate(chunks[:12]):
+                    docnm = (c.get("docnm_kwd") or c.get("document_name") or "").strip()
+                    content = (c.get("content_with_weight") or c.get("content") or "").strip()
+                    if not content:
+                        continue
+                    head = f"[{i+1}]"
+                    if docnm:
+                        head += f" {docnm}"
+                    context_lines.append(head)
+                    context_lines.append(content)
+                context_block = "\n".join(context_lines)
+                if len(context_block) > 6000:
+                    context_block = context_block[:6000] + "\n...(已截断)"
+
+                injected_question = (
+                    "请基于以下【知识库检索结果】回答用户问题。若资料不足请说明。\n\n"
+                    f"【知识库检索结果】\n{context_block}\n\n"
+                    f"【用户问题】\n{question}"
+                )
+
+                rag_session = reg.get("session")
+                if rag_session is None:
+                    rag_session = self._recover_agent_session(
+                        reg["agent_id"], session_id, reg.get("agent_owner_id", "")
+                    )
+                    if rag_session:
+                        reg["session"] = rag_session
+                        self._session_registry[session_id] = reg
+
+                if rag_session is not None:
+                    try:
+                        answer_obj = None
+                        for ans in rag_session.ask(
+                            question=injected_question,
+                            stream=False,
+                            inputs={"knowledge_context": {"value": context_block}},
+                        ):
+                            answer_obj = ans
+                        answer = (answer_obj.content or "") if answer_obj else "Agent returned no response."
+                    except Exception as e:
+                        print(f"[PORTAL ERROR] Agent session.ask() failed (agent+kb): {e}")
+                        answer = self._direct_chat([{"role": "user", "content": injected_question}])
+                else:
+                    answer = self._direct_chat([{"role": "user", "content": injected_question}])
+
+                references = chunks
+            else:
+                # 用户没选知识库 → 走智能体原始工作流
+                rag_session = reg.get("session")
+                if rag_session is None:
+                    rag_session = self._recover_agent_session(
+                        reg["agent_id"], session_id, reg.get("agent_owner_id", "")
+                    )
+                    if rag_session:
+                        reg["session"] = rag_session
+                        self._session_registry[session_id] = reg
+
+                if rag_session is not None:
+                    try:
+                        print(f"[PORTAL DEBUG] Calling session.ask() for agent {reg['agent_id']}")
+                        answer_obj = None
+                        for ans in rag_session.ask(question=question, stream=False):
+                            answer_obj = ans
+                        if answer_obj:
+                            answer = answer_obj.content or ""
+                            raw_ref = getattr(answer_obj, "reference", None) or {}
+                            references = self._extract_chunks(raw_ref)
+                        else:
+                            answer = "Agent returned no response."
+                            references = []
+                    except Exception as e:
+                        print(f"[PORTAL ERROR] Agent session.ask() failed: {e}")
+                        answer = self._direct_chat([{"role": "user", "content": question}])
+                        references = []
+                else:
+                    answer = self._direct_chat([{"role": "user", "content": question}])
+                    references = []
 
         self.store.append_portal_message(session_id, "user", question, references=[])
         self.store.append_portal_message(session_id, "assistant", answer, references=references)
@@ -1404,10 +1720,12 @@ def load_portal_config_from_env() -> PortalConfig:
         raise RuntimeError("RAGFLOW_API_KEY is required")
 
     secret = os.getenv("PORTAL_AUTH_SECRET", "").strip() or hashlib.sha256((api_key + "portal").encode("utf-8")).hexdigest()
+
+    default_db_path = str((Path(__file__).resolve().parent / "data" / "portal_auth.sqlite3").resolve())
     return PortalConfig(
         api_key=api_key,
         base_url=os.getenv("RAGFLOW_BASE_URL", "http://127.0.0.1:9380").strip(),
-        db_path=os.getenv("PORTAL_DB_PATH", "./extensions/qms_agent_backend/data/portal_auth.sqlite3").strip(),
+        db_path=os.getenv("PORTAL_DB_PATH", default_db_path).strip(),
         auth_secret=secret,
         direct_chat_url=os.getenv("DIRECT_CHAT_URL", "https://apimgateway.siemens-healthineers.com").strip(),
         direct_chat_api_key=os.getenv("DIRECT_CHAT_API_KEY", "ab6b83c59c2f488e931287b66cadd124").strip(),
@@ -1520,7 +1838,11 @@ def create_app() -> Flask:
         try:
             ragflow_base = gateway.cfg.base_url.rstrip("/")
             email = login_id.lower() if "@" in login_id else f"{login_id.lower()}@siemens-healthineers.com"
-            enc_password = _encrypt_password_for_ragflow(password)
+            try:
+                enc_password = _encrypt_password_for_ragflow(password)
+            except ModuleNotFoundError as e:
+                # Misconfiguration of the portal runtime environment.
+                return _err(str(e), 500, "dependency_missing")
 
             # Step 1a: Register
             resp = requests.post(
@@ -1905,6 +2227,7 @@ def create_app() -> Flask:
         target_dept_ids = payload.get("target_dept_ids") or []
         target_user_login = (payload.get("target_user_login") or "").strip()
         reason = (payload.get("reason") or "").strip()
+        permission = (payload.get("permission") or "read").strip().lower()
         try:
             data = gateway.request_kb_share(
                 auth,
@@ -1913,6 +2236,7 @@ def create_app() -> Flask:
                 target_dept_ids=[str(x) for x in target_dept_ids if str(x).strip()],
                 target_user_login=target_user_login,
                 reason=reason,
+                permission=permission,
             )
             gateway.store.write_audit(req_id, "kb.share.request", "success", user_id=auth.get("sub"), resource_type="kb", resource_id=kb_id)
             return _ok(data)
@@ -1982,8 +2306,10 @@ def create_app() -> Flask:
         policy = gateway.store.get_policy("kb", kb_id)
         if not policy:
             return _err("kb not found", 404)
-        perm = gateway.store.has_kb_access(kb_id, user_id)
-        if perm == 0:
+        depts = {PortalGateway._normalize_dept_id(x) for x in (auth.get("dept_ids") or [])}
+        selected_dept = PortalGateway._normalize_dept_id(auth.get("default_dept_id") or "")
+        perm = int(gateway.store.effective_kb_permission(depts, selected_dept, kb_id, user_id, policy=policy))
+        if not gateway.store.has_read(perm):
             return _err("no access to this knowledge base", 403)
         shares = gateway.store.list_kb_shares(kb_id)
         return _ok({"items": shares})
@@ -2265,6 +2591,72 @@ def create_app() -> Flask:
             resource_id="*",
         )
         return _ok(data)
+
+    # ---- Recall Dashboard routes ----
+
+    @app.route("/portal/v1/kbs/<kb_id>/share-to-depts", methods=["POST", "OPTIONS"])
+    def share_kb_to_depts(kb_id: str):
+        if request.method == "OPTIONS":
+            return ("", 204)
+        auth = _auth_payload()
+        if not auth:
+            return _err("unauthorized", 401, "unauthorized")
+        req_id = _request_id()
+        body = request.get_json(silent=True) or {}
+        dept_ids = body.get("dept_ids") or []
+        permission_mask = body.get("permission_mask")
+        if not isinstance(permission_mask, int):
+            # Fall back to string mapping
+            perm_str = str(body.get("permission") or "read").strip().lower()
+            if perm_str == "write":
+                permission_mask = 7
+            elif perm_str == "share":
+                permission_mask = 5
+            else:
+                permission_mask = 4
+        if not dept_ids:
+            return _err("dept_ids is required", 400)
+        try:
+            data = gateway.share_kb_to_depts(auth, kb_id, [str(d) for d in dept_ids], int(permission_mask))
+            gateway.store.write_audit(req_id, "kb.share_to_depts", "success", user_id=auth.get("sub"), dept_id=auth.get("default_dept_id"), resource_type="kb", resource_id=kb_id)
+            return _ok(data)
+        except PermissionError as exc:
+            return _err(str(exc), 403, "forbidden")
+        except ValueError as exc:
+            return _err(str(exc), 400)
+
+    @app.route("/portal/v1/kbs/my-shares", methods=["GET"])
+    def list_my_shares():
+        auth = _auth_payload()
+        if not auth:
+            return _err("unauthorized", 401, "unauthorized")
+        try:
+            data = gateway.list_all_shares(auth)
+            return _ok(data)
+        except PermissionError as exc:
+            return _err(str(exc), 403, "forbidden")
+
+    @app.route("/portal/v1/kbs/<kb_id>/revoke-selective", methods=["POST", "OPTIONS"])
+    def revoke_selective(kb_id: str):
+        if request.method == "OPTIONS":
+            return ("", 204)
+        auth = _auth_payload()
+        if not auth:
+            return _err("unauthorized", 401, "unauthorized")
+        req_id = _request_id()
+        body = request.get_json(silent=True) or {}
+        revoke_type = (body.get("revoke_type") or "").strip()
+        target_id = str(body.get("target_id") or "").strip()
+        if not revoke_type or not target_id:
+            return _err("revoke_type and target_id are required", 400)
+        try:
+            data = gateway.selective_revoke(auth, kb_id, revoke_type, target_id)
+            gateway.store.write_audit(req_id, "kb.revoke_selective", "success", user_id=auth.get("sub"), dept_id=auth.get("default_dept_id"), resource_type="kb", resource_id=kb_id)
+            return _ok(data)
+        except PermissionError as exc:
+            return _err(str(exc), 403, "forbidden")
+        except ValueError as exc:
+            return _err(str(exc), 400)
 
     @app.route("/portal/v1/audit/logs", methods=["GET"])
     def list_audit_logs():

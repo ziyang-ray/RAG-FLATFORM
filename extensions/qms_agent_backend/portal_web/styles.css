@@ -666,6 +666,78 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand); }
 .tag-mc      { background: #ffe4e6; color: #9f1239; }
 .tag-at      { background: #ccfbf1; color: #115e59; }
 
+/* ========== 撤回分享看板 ========== */
+.config-modal-md {
+  width: 680px;
+  height: auto;
+  max-height: 80vh;
+}
+.config-modal-md .config-modal-body {
+  max-height: 65vh;
+  overflow-y: auto;
+}
+.recall-section { margin-bottom: 16px; }
+.recall-section:last-of-type { margin-bottom: 0; }
+.recall-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.recall-list { display: flex; flex-direction: column; gap: 6px; }
+.recall-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  gap: 8px;
+}
+.recall-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.recall-kb {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+.recall-user {
+  font-size: 12px;
+  color: var(--info);
+  background: rgba(59,130,246,.08);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.recall-perm {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg-soft);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.recall-revoke-btn { flex-shrink: 0; }
+
+/* ========== 权限复选框 ========== */
+.perm-checkbox-group {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.perm-checkbox-group .checkline { font-size: 13px; }
+.perm-checkbox-group label:has(input:disabled) {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* ========== 滚动条 ========== */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 3px; }
