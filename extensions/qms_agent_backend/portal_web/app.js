@@ -634,7 +634,6 @@ function renderShareTargetPanel() {
       shareTargetPanel.innerHTML = "";
       const depts = (res.ok && res.data?.items) ? res.data.items : [];
       for (const d of depts) {
-        if (d.dept_id === state.me?.default_dept_id) continue; // skip own dept
         const label = document.createElement("label");
         label.className = "checkline";
         const cb = document.createElement("input");

@@ -1283,12 +1283,17 @@ class PortalGateway:
 
         merged = sorted(set(existing_allow + normalized_new))
 
+        # If sharing to own dept and KB is private, change visibility to "dept"
+        new_visibility = policy.get("visibility") or "dept"
+        if new_visibility == "private" and owner_dept in merged:
+            new_visibility = "dept"
+
         # Update policy
         self.store.upsert_policy(
             resource_type="kb",
             resource_id=kb_id,
             owner_dept_id=owner_dept,
-            visibility=policy.get("visibility") or "dept",
+            visibility=new_visibility,
             created_by=user_id,
             owner_user_id=owner_user_id,
             allow_dept_ids=merged,
