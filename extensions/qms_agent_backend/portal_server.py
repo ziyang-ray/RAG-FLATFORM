@@ -629,7 +629,7 @@ class PortalGateway:
             raise PermissionError("dept not allowed")
         user_id = token_payload.get("sub")
 
-        if not agent_id:
+        if not agent_id or agent_id == "direct":
             session_id = f"direct-{uuid.uuid4().hex}"
             # Validate user-selected kb_ids for direct mode
             valid_kb_ids: list[str] = []
