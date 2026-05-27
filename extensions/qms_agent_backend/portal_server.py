@@ -1504,7 +1504,7 @@ class PortalGateway:
         return all_chunks[:top_k]
 
     def _generate_answer(self, question: str, chunks: list[dict[str, Any]], history: list[dict[str, str]] | None = None) -> str:
-        """Generate answer using LLM with retrieved context."""
+        """Generate answer using LLM with retrieved context (QMS agent mode)."""
         if not chunks:
             return "当前知识库中未找到相关信息。"
 
@@ -1528,6 +1528,33 @@ class PortalGateway:
             messages.append({"role": "system", "content": system_prompt})
         if history:
             messages.extend(history[-6:])  # last 6 messages for context
+        messages.append({
+            "role": "user",
+            "content": f"根据以下知识库检索结果回答问题。如果检索结果中没有相关信息，明确告知用户。\n\n检索结果:\n{context}\n\n用户问题: {question}"
+        })
+
+        try:
+            answer = self._direct_chat(messages)
+            return answer
+        except Exception as e:
+            print(f"[PORTAL ERROR] LLM generation failed: {e}")
+            return f"**回答生成失败**: {str(e)}"
+
+    def _generate_answer_direct(self, question: str, chunks: list[dict[str, Any]], history: list[dict[str, str]] | None = None) -> str:
+        """Generate answer for direct GPT mode — no QMS agent system prompt."""
+        if not chunks:
+            return "当前知识库中未找到相关信息。"
+
+        context_parts = []
+        for i, c in enumerate(chunks, 1):
+            doc_name = c.get("document_name", "未知文件")
+            content = c.get("content", "")
+            context_parts.append(f"[{i}] 文件: {doc_name}\n{content}")
+        context = "\n\n".join(context_parts)
+
+        messages = []
+        if history:
+            messages.extend(history[-6:])
         messages.append({
             "role": "user",
             "content": f"根据以下知识库检索结果回答问题。如果检索结果中没有相关信息，明确告知用户。\n\n检索结果:\n{context}\n\n用户问题: {question}"
@@ -1597,7 +1624,7 @@ class PortalGateway:
                 for m in hist_msgs:
                     if m.get("role") in {"user", "assistant"}:
                         history.append({"role": m.get("role"), "content": m.get("content")})
-                answer = self._generate_answer(question, chunks, history)
+                answer = self._generate_answer_direct(question, chunks, history)
                 references = chunks
                 print(f"[PORTAL DEBUG] direct+kb: retrieved {len(chunks)} chunks from {len(kb_ids)} KBs")
             else:
