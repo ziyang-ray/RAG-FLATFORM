@@ -45,6 +45,13 @@ const kbUploadMsg = document.getElementById("kbUploadMsg");
 const kbPrivateToggle = document.getElementById("kbPrivateToggle");
 const kbUploadBtn = document.getElementById("kbUploadBtn");
 
+// 上传进度弹窗
+const kbProgressModal = document.getElementById("kbProgressModal");
+const progressPhase = document.getElementById("progressPhase");
+const progressBar = document.getElementById("progressBar");
+const progressPercent = document.getElementById("progressPercent");
+const progressDetail = document.getElementById("progressDetail");
+
 // KB 分享弹窗
 const kbShareModal = document.getElementById("kbShareModal");
 const openKbShareBtn = document.getElementById("openKbShareBtn");
@@ -431,7 +438,7 @@ function closeModal(modal) {
 }
 
 function closeAllModals() {
-  [configModal, kbUploadModal, kbShareModal, kbUnshareModal, deleteKbModal, shareRequestsModal].forEach(closeModal);
+  [configModal, kbUploadModal, kbProgressModal, kbShareModal, kbUnshareModal, deleteKbModal, shareRequestsModal].forEach(closeModal);
 }
 
 /* ============================
@@ -1039,7 +1046,7 @@ async function onToggleSessionPrivacy(sessionId, isPrivate) {
   }
 }
 
-async function onUploadKb() {
+function onUploadKb() {
   kbUploadMsg.textContent = "";
   const files = kbFileInput.files;
   const name = kbNameInput.value.trim();
@@ -1058,22 +1065,149 @@ async function onUploadKb() {
   const description = (kbDescInput?.value || "").trim();
   if (description) formData.append("description", description);
   for (let i = 0; i < files.length; i++) formData.append("files", files[i]);
-  const res = await fetch(`/portal/v1/kbs`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${state.token}` },
-    body: formData,
-  });
-  const json = await res.json();
-  if (!json.ok) {
-    kbUploadMsg.textContent = json.message || "上传失败";
-    return;
-  }
-  kbUploadMsg.textContent = "上传成功";
-  kbNameInput.value = "";
-  kbFileInput.value = "";
+
+  // Show progress modal, hide upload modal
+  closeModal(kbUploadModal);
+  openModal(kbProgressModal);
+  if (progressPhase) progressPhase.textContent = "正在上传文件...";
+  if (progressBar) { progressBar.style.width = "0%"; progressBar.className = "progress-bar-fill"; }
+  if (progressPercent) progressPercent.textContent = "0%";
+  if (progressDetail) progressDetail.textContent = "";
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/portal/v1/kbs");
+  xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
+
+  // Upload progress
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round((e.loaded / e.total) * 100);
+      if (progressBar) progressBar.style.width = pct + "%";
+      if (progressPercent) progressPercent.textContent = pct + "%";
+    }
+  };
+
+  xhr.onload = () => {
+    let json;
+    try { json = JSON.parse(xhr.responseText); } catch { json = null; }
+    if (!json || !json.ok) {
+      if (progressPhase) progressPhase.textContent = "上传失败";
+      if (progressDetail) progressDetail.textContent = json?.message || "请求失败";
+      if (progressBar) progressBar.className = "progress-bar-fill fail";
+      setTimeout(() => { closeModal(kbProgressModal); }, 3000);
+      return;
+    }
+
+    // Upload complete, start embedding polling
+    const data = json.data;
+    const docIds = data.doc_ids || [];
+    const kbId = data.kb_id || "";
+
+    if (progressBar) progressBar.style.width = "100%";
+    if (progressPercent) progressPercent.textContent = "100%";
+
+    if (!docIds.length || !kbId) {
+      finishUpload("知识库上传完成！");
+      return;
+    }
+
+    if (progressPhase) progressPhase.textContent = "正在将文件转为向量...";
+    if (progressPercent) progressPercent.textContent = "0%";
+    if (progressBar) { progressBar.style.width = "0%"; progressBar.className = "progress-bar-fill"; }
+    pollParseStatus(kbId, docIds);
+  };
+
+  xhr.onerror = () => {
+    if (progressPhase) progressPhase.textContent = "上传失败";
+    if (progressDetail) progressDetail.textContent = "网络错误";
+    if (progressBar) progressBar.className = "progress-bar-fill fail";
+    setTimeout(() => { closeModal(kbProgressModal); }, 3000);
+  };
+
+  xhr.send(formData);
+}
+
+function finishUpload(msg) {
+  if (progressPhase) progressPhase.textContent = msg;
+  if (progressPercent) progressPercent.textContent = "";
+  if (progressDetail) progressDetail.textContent = "";
+  if (progressBar) { progressBar.style.width = "100%"; progressBar.className = "progress-bar-fill done"; }
+  // Clear form
+  if (kbNameInput) kbNameInput.value = "";
+  if (kbFileInput) kbFileInput.value = "";
   if (kbDescInput) kbDescInput.value = "";
-  setTimeout(() => { kbUploadMsg.textContent = ""; }, 2000);
-  await loadResources();
+  setTimeout(async () => {
+    closeModal(kbProgressModal);
+    await loadResources();
+  }, 2000);
+}
+
+function pollParseStatus(kbId, docIds) {
+  const ids = docIds.join(",");
+  let pollTimer = null;
+  let retryCount = 0;
+  const maxRetries = 150; // ~5 minutes at 2s intervals
+
+  function doPoll() {
+    apiJson(`/portal/v1/kbs/parse-status?kb_id=${encodeURIComponent(kbId)}&doc_ids=${encodeURIComponent(ids)}`)
+      .then(res => {
+        if (!res.ok) {
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            finishUpload("向量化超时，请稍后查看");
+            return;
+          }
+          pollTimer = setTimeout(doPoll, 2000);
+          return;
+        }
+        const d = res.data;
+        const pct = Math.round((d.overall_progress || 0) * 100);
+        if (progressBar) progressBar.style.width = pct + "%";
+        if (progressPercent) progressPercent.textContent = pct + "%";
+
+        // Show per-file detail
+        const running = (d.docs || []).filter(doc => doc.run === "RUNNING");
+        if (progressDetail && running.length > 0) {
+          const first = running[0];
+          const docPct = Math.round((first.progress || 0) * 100);
+          progressDetail.textContent = `${first.name || "文件"}: ${docPct}%`;
+        }
+
+        if (d.all_done) {
+          finishUpload("知识库上传完成！");
+          return;
+        }
+        if (d.failed > 0 && d.done + d.failed >= d.total) {
+          finishUpload(`上传完成（${d.done} 成功, ${d.failed} 失败）`);
+          return;
+        }
+        retryCount++;
+        if (retryCount >= maxRetries) {
+          finishUpload("向量化超时，请稍后查看");
+          return;
+        }
+        pollTimer = setTimeout(doPoll, 2000);
+      })
+      .catch(() => {
+        retryCount++;
+        if (retryCount >= maxRetries) {
+          finishUpload("向量化超时，请稍后查看");
+          return;
+        }
+        pollTimer = setTimeout(doPoll, 2000);
+      });
+  }
+
+  // Stop polling if modal is closed
+  const observer = new MutationObserver(() => {
+    if (kbProgressModal && kbProgressModal.classList.contains("hidden")) {
+      if (pollTimer) clearTimeout(pollTimer);
+      observer.disconnect();
+    }
+  });
+  if (kbProgressModal) observer.observe(kbProgressModal, { attributes: true, attributeFilter: ["class"] });
+
+  doPoll();
 }
 
 async function onCreateShareRequest() {
@@ -1605,7 +1739,7 @@ if (toggleKbManagementBtn) {
 }
 
 // 弹窗背景点击关闭
-[configModal, kbUploadModal, kbShareModal, kbUnshareModal, deleteKbModal, shareRequestsModal].forEach(modal => {
+[configModal, kbUploadModal, kbProgressModal, kbShareModal, kbUnshareModal, deleteKbModal, shareRequestsModal].forEach(modal => {
   if (modal) {
     modal.addEventListener("click", (e) => {
       if (e.target === modal) closeModal(modal);

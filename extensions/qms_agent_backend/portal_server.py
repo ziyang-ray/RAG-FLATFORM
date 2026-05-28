@@ -866,6 +866,80 @@ class PortalGateway:
             "is_private": bool(is_private),
             "uploaded_files": len(docs_payload),
             "queued_docs": len(doc_ids),
+            "doc_ids": doc_ids,
+        }
+
+    def get_parse_status(self, token_payload: dict[str, Any], kb_id: str, doc_ids: list[str]) -> dict[str, Any]:
+        """Poll document parsing/embedding progress from RAGFlow."""
+        user_id = token_payload.get("sub") or ""
+        if not user_id:
+            raise PermissionError("unauthorized")
+
+        policy = self.store.get_policy("kb", kb_id)
+        owner_id = (policy or {}).get("owner_user_id") or ""
+        rag_client = self.get_rag_client(owner_id) if owner_id else self.rag
+
+        datasets = rag_client.list_datasets(page=1, page_size=500, id=kb_id)
+        if not datasets:
+            raise ValueError("dataset not found")
+        ds = datasets[0]
+
+        docs_info = []
+        done_count = 0
+        running_count = 0
+        failed_count = 0
+        total_progress = 0.0
+
+        for doc_id in doc_ids:
+            try:
+                docs = ds.list_documents(id=doc_id, page=1, page_size=1)
+                if not docs:
+                    docs_info.append({"id": doc_id, "name": "", "run": "UNSTART", "progress": 0, "progress_msg": ""})
+                    continue
+                doc = docs[0]
+                run = doc.run or "0"
+                progress = float(doc.progress or 0)
+                name = doc.name or ""
+                progress_msg = doc.progress_msg or ""
+
+                run_map = {"0": "UNSTART", "1": "RUNNING", "2": "CANCEL", "3": "DONE", "4": "FAIL"}
+                run_text = run_map.get(str(run), str(run))
+
+                if run_text == "DONE":
+                    done_count += 1
+                    total_progress += 1.0
+                elif run_text == "RUNNING":
+                    running_count += 1
+                    total_progress += progress
+                elif run_text == "FAIL":
+                    failed_count += 1
+                    total_progress += progress
+                else:
+                    total_progress += progress
+
+                docs_info.append({
+                    "id": doc_id,
+                    "name": name,
+                    "run": run_text,
+                    "progress": round(progress, 2),
+                    "progress_msg": progress_msg,
+                })
+            except Exception as e:
+                print(f"[PORTAL WARN] get_parse_status doc {doc_id}: {e}")
+                docs_info.append({"id": doc_id, "name": "", "run": "ERROR", "progress": 0, "progress_msg": str(e)})
+
+        total = len(doc_ids)
+        overall = round(total_progress / total, 2) if total > 0 else 0
+        all_done = done_count == total
+
+        return {
+            "total": total,
+            "done": done_count,
+            "running": running_count,
+            "failed": failed_count,
+            "overall_progress": overall,
+            "all_done": all_done,
+            "docs": docs_info,
         }
 
     def request_kb_share(
@@ -2667,6 +2741,26 @@ def create_app() -> Flask:
             return _ok(data)
         except PermissionError as exc:
             return _err(str(exc), 403, "forbidden")
+
+    @app.route("/portal/v1/kbs/parse-status", methods=["GET"])
+    def kb_parse_status():
+        auth = _auth_payload()
+        if not auth:
+            return _err("unauthorized", 401, "unauthorized")
+        kb_id = request.args.get("kb_id", "").strip()
+        doc_ids_str = request.args.get("doc_ids", "").strip()
+        if not kb_id or not doc_ids_str:
+            return _err("kb_id and doc_ids are required", 400)
+        doc_ids = [d.strip() for d in doc_ids_str.split(",") if d.strip()]
+        if not doc_ids:
+            return _err("doc_ids is empty", 400)
+        try:
+            data = gateway.get_parse_status(auth, kb_id, doc_ids)
+            return _ok(data)
+        except PermissionError as exc:
+            return _err(str(exc), 403, "forbidden")
+        except ValueError as exc:
+            return _err(str(exc), 400)
 
     @app.route("/portal/v1/kbs/<kb_id>/revoke-selective", methods=["POST", "OPTIONS"])
     def revoke_selective(kb_id: str):
