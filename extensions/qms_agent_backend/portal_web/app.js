@@ -1760,6 +1760,30 @@ if (toggleKbManagementBtn) {
 });
 
 /* ============================
+   使用条款弹窗
+   ============================ */
+const termsModal = document.getElementById("termsModal");
+const termsAgreeBtn = document.getElementById("termsAgreeBtn");
+const termsAgreed = sessionStorage.getItem("terms_agreed") === "1";
+
+if (termsModal) {
+  if (termsAgreed) {
+    termsModal.classList.add("hidden");
+  } else {
+    termsModal.classList.remove("hidden");
+    loginCard.style.display = "none";
+  }
+}
+
+if (termsAgreeBtn) {
+  termsAgreeBtn.onclick = () => {
+    sessionStorage.setItem("terms_agreed", "1");
+    termsModal.classList.add("hidden");
+    loginCard.style.display = "";
+  };
+}
+
+/* ============================
    页面加载初始化
    ============================ */
 (async function boot() {
