@@ -1100,8 +1100,10 @@ function onUploadKb() {
 
     // Upload complete, start embedding polling
     const data = json.data;
+    console.log("[UPLOAD] response data:", JSON.stringify(data));
     const docIds = data.doc_ids || [];
     const kbId = data.kb_id || "";
+    console.log("[UPLOAD] kbId:", kbId, "docIds:", docIds);
 
     if (progressBar) progressBar.style.width = "100%";
     if (progressPercent) progressPercent.textContent = "100%";
@@ -1149,8 +1151,11 @@ function pollParseStatus(kbId, docIds) {
   const maxRetries = 150; // ~5 minutes at 2s intervals
 
   function doPoll() {
-    apiJson(`/portal/v1/kbs/parse-status?kb_id=${encodeURIComponent(kbId)}&doc_ids=${encodeURIComponent(ids)}`)
+    const url = `/portal/v1/kbs/parse-status?kb_id=${encodeURIComponent(kbId)}&doc_ids=${encodeURIComponent(ids)}`;
+    console.log("[POLL] polling:", url);
+    apiJson(url)
       .then(res => {
+        console.log("[POLL] response:", JSON.stringify(res));
         if (!res.ok) {
           retryCount++;
           if (retryCount >= maxRetries) {
@@ -1161,6 +1166,7 @@ function pollParseStatus(kbId, docIds) {
           return;
         }
         const d = res.data;
+        console.log("[POLL] status:", d.total, "done:", d.done, "running:", d.running, "failed:", d.failed, "overall:", d.overall_progress, "all_done:", d.all_done);
         const pct = Math.round((d.overall_progress || 0) * 100);
         if (progressBar) progressBar.style.width = pct + "%";
         if (progressPercent) progressPercent.textContent = pct + "%";
@@ -1171,6 +1177,11 @@ function pollParseStatus(kbId, docIds) {
           const first = running[0];
           const docPct = Math.round((first.progress || 0) * 100);
           progressDetail.textContent = `${first.name || "文件"}: ${docPct}%`;
+        } else if (progressDetail) {
+          const doneDocs = (d.docs || []).filter(doc => doc.run === "DONE");
+          if (doneDocs.length > 0) {
+            progressDetail.textContent = `已完成 ${doneDocs.length}/${d.total} 个文件`;
+          }
         }
 
         if (d.all_done) {
@@ -1188,7 +1199,8 @@ function pollParseStatus(kbId, docIds) {
         }
         pollTimer = setTimeout(doPoll, 2000);
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error("[POLL] error:", err);
         retryCount++;
         if (retryCount >= maxRetries) {
           finishUpload("向量化超时，请稍后查看");
