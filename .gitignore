@@ -231,3 +231,7 @@ internal/cpp/cmake-build-debug/
 # Go server build output
 bin/*
 !bin/.gitkeep
+
+# QMS Agent Backend - sensitive/runtime files
+extensions/qms_agent_backend/data/*.sqlite3
+extensions/qms_agent_backend/**/__pycache__/

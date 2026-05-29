@@ -1,5 +1,5 @@
 """
-Test script: probe the Azure OpenAI gateway to discover the actual model behind deployment "gpt-5.4".
+Test script: probe the Azure OpenAI gateway to discover the actual model behind deployment "gpt-4o".
 Usage: python test_azure_openai.py
 """
 
@@ -8,8 +8,8 @@ import os
 import requests
 
 BASE_URL = "https://apimgateway.siemens-healthineers.com"
-API_KEY = "ab6b83c59c2f488e931287b66cadd124"
-DEPLOYMENT = "gpt-5.4"
+API_KEY = "YOUR_API_KEY_HERE"
+DEPLOYMENT = "gpt-4o"
 AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "2024-12-01-preview").strip()
 
 

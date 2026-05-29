@@ -340,7 +340,7 @@ class PortalStore:
                     (dept_id, code, name, parent, is_public, now, now),
                 )
 
-            default_user = conn.execute("SELECT user_id FROM users WHERE login_id = ?", ("mp@siemens-healthineers.com",)).fetchone()
+            default_user = conn.execute("SELECT user_id FROM users WHERE login_id = ?", ("mp@example.com",)).fetchone()
             if not default_user:
                 user_id = "u_mp_default"
                 conn.execute(
@@ -350,10 +350,10 @@ class PortalStore:
                     """,
                     (
                         user_id,
-                        "mp@siemens-healthineers.com",
+                        "mp@example.com",
                         self.make_password_hash("12345678"),
                         "MP管理员",
-                        "mp@siemens-healthineers.com",
+                        "mp@example.com",
                         now,
                         now,
                     ),
@@ -368,7 +368,7 @@ class PortalStore:
                 )
 
             # Ensure MP default user can manage all sub-depts.
-            mp_row = conn.execute("SELECT user_id FROM users WHERE login_id = ?", ("mp@siemens-healthineers.com",)).fetchone()
+            mp_row = conn.execute("SELECT user_id FROM users WHERE login_id = ?", ("mp@example.com",)).fetchone()
             mp_user_id = mp_row["user_id"] if mp_row else "u_mp_default"
             for dept_id in ["dept_mp_q", "dept_mp_plm", "dept_mp_ap", "dept_mp_mc", "dept_mp_usdx"]:
                 conn.execute(
@@ -382,11 +382,11 @@ class PortalStore:
 
             # Seed demo staff users.
             dept_demo_users = [
-                ("u_mp_q_staff", "mp-q-staff@siemens-healthineers.com", "MP-Q-staff01", "dept_mp_q"),
-                ("u_mp_plm_staff", "mp-plm-staff@siemens-healthineers.com", "MP-PLM-staff01", "dept_mp_plm"),
-                ("u_mp_ap_staff", "mp-ap-staff@siemens-healthineers.com", "MP-AP-staff01", "dept_mp_ap"),
-                ("u_mp_mc_staff", "mp-mc-staff@siemens-healthineers.com", "MP-MC-staff01", "dept_mp_mc"),
-                ("u_mp_usdx_staff", "mp-usdx-staff@siemens-healthineers.com", "MP-USDX-staff01", "dept_mp_usdx"),
+                ("u_mp_q_staff", "mp-q-staff@example.com", "MP-Q-staff01", "dept_mp_q"),
+                ("u_mp_plm_staff", "mp-plm-staff@example.com", "MP-PLM-staff01", "dept_mp_plm"),
+                ("u_mp_ap_staff", "mp-ap-staff@example.com", "MP-AP-staff01", "dept_mp_ap"),
+                ("u_mp_mc_staff", "mp-mc-staff@example.com", "MP-MC-staff01", "dept_mp_mc"),
+                ("u_mp_usdx_staff", "mp-usdx-staff@example.com", "MP-USDX-staff01", "dept_mp_usdx"),
             ]
             for uid, login_id, display_name, dept_id in dept_demo_users:
                 row = conn.execute("SELECT user_id FROM users WHERE login_id = ?", (login_id,)).fetchone()
@@ -401,7 +401,7 @@ class PortalStore:
                             login_id,
                             self.make_password_hash("12345678"),
                             display_name,
-                            f"{login_id.lower().replace('&', '')}" if "@" in login_id else f"{login_id.lower().replace('&', '')}@siemens-healthineers.com",
+                            f"{login_id.lower().replace('&', '')}" if "@" in login_id else f"{login_id.lower().replace('&', '')}@example.com",
                             now,
                             now,
                         ),
@@ -425,11 +425,11 @@ class PortalStore:
 
             # Seed demo admin users.
             dept_admin_users = [
-                ("u_mp_q_admin", "mp-q-admin@siemens-healthineers.com", "MP-Q-admin", "dept_mp_q"),
-                ("u_mp_plm_admin", "mp-plm-admin@siemens-healthineers.com", "MP-PLM-admin", "dept_mp_plm"),
-                ("u_mp_ap_admin", "mp-ap-admin@siemens-healthineers.com", "MP-AP-admin", "dept_mp_ap"),
-                ("u_mp_mc_admin", "mp-mc-admin@siemens-healthineers.com", "MP-MC-admin", "dept_mp_mc"),
-                ("u_mp_usdx_admin", "mp-usdx-admin@siemens-healthineers.com", "MP-USDX-admin", "dept_mp_usdx"),
+                ("u_mp_q_admin", "mp-q-admin@example.com", "MP-Q-admin", "dept_mp_q"),
+                ("u_mp_plm_admin", "mp-plm-admin@example.com", "MP-PLM-admin", "dept_mp_plm"),
+                ("u_mp_ap_admin", "mp-ap-admin@example.com", "MP-AP-admin", "dept_mp_ap"),
+                ("u_mp_mc_admin", "mp-mc-admin@example.com", "MP-MC-admin", "dept_mp_mc"),
+                ("u_mp_usdx_admin", "mp-usdx-admin@example.com", "MP-USDX-admin", "dept_mp_usdx"),
             ]
             for uid, login_id, display_name, dept_id in dept_admin_users:
                 row = conn.execute("SELECT user_id FROM users WHERE login_id = ?", (login_id,)).fetchone()
@@ -444,7 +444,7 @@ class PortalStore:
                             login_id,
                             self.make_password_hash("12345678"),
                             display_name,
-                            f"{login_id.lower().replace('&', '')}" if "@" in login_id else f"{login_id.lower().replace('&', '')}@siemens-healthineers.com",
+                            f"{login_id.lower().replace('&', '')}" if "@" in login_id else f"{login_id.lower().replace('&', '')}@example.com",
                             now,
                             now,
                         ),

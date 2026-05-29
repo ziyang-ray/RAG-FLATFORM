@@ -169,7 +169,7 @@ class PortalGateway:
         if not users:
             return
         for user_id, login_id in users:
-            email = login_id.lower() if "@" in login_id else f"{login_id.lower()}@siemens-healthineers.com"
+            email = login_id.lower() if "@" in login_id else f"{login_id.lower()}@example.com"
             try:
                 enc_pwd = _encrypt_password_for_ragflow("12345678")
                 resp = requests.post(
@@ -1834,8 +1834,8 @@ def load_portal_config_from_env() -> PortalConfig:
         db_path=os.getenv("PORTAL_DB_PATH", default_db_path).strip(),
         auth_secret=secret,
         direct_chat_url=os.getenv("DIRECT_CHAT_URL", "https://apimgateway.siemens-healthineers.com").strip(),
-        direct_chat_api_key=os.getenv("DIRECT_CHAT_API_KEY", "ab6b83c59c2f488e931287b66cadd124").strip(),
-        direct_chat_model=os.getenv("DIRECT_CHAT_MODEL", "gpt-5.4").strip(),
+        direct_chat_api_key=os.getenv("DIRECT_CHAT_API_KEY", "YOUR_API_KEY_HERE").strip(),
+        direct_chat_model=os.getenv("DIRECT_CHAT_MODEL", "gpt-4o").strip(),
         token_ttl_seconds=int(os.getenv("PORTAL_TOKEN_TTL_SECONDS", "28800")),
     )
 
@@ -1943,7 +1943,7 @@ def create_app() -> Flask:
         ragflow_token = ""
         try:
             ragflow_base = gateway.cfg.base_url.rstrip("/")
-            email = login_id.lower() if "@" in login_id else f"{login_id.lower()}@siemens-healthineers.com"
+            email = login_id.lower() if "@" in login_id else f"{login_id.lower()}@example.com"
             try:
                 enc_password = _encrypt_password_for_ragflow(password)
             except ModuleNotFoundError as e:
